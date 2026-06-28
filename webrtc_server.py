@@ -3,6 +3,7 @@ import logging
 import os
 import threading
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
@@ -18,7 +19,6 @@ logger = logging.getLogger(__name__)
 STREAM_PORT = int(os.environ.get("STREAM_PORT", "8554"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8000"))
 
-app = FastAPI(title="Desktop Streamer — WebRTC")
 relay = MediaRelay()
 source_track = None
 
@@ -92,8 +92,9 @@ HTML_PAGE = """\
 class StreamTrack(VideoStreamTrack):
     kind = "video"
 
-    def __init__(self):
+    def __init__(self, loop):
         super().__init__()
+        self._loop = loop
         self._queue = asyncio.Queue(maxsize=60)
         self._running = True
         self._thread = threading.Thread(target=self._reader, daemon=True)
@@ -106,12 +107,9 @@ class StreamTrack(VideoStreamTrack):
 
     def _reader(self):
         url = f"tcp://0.0.0.0:{STREAM_PORT}?listen=1&reuse=1"
-        loop = None
         while self._running:
             container = None
             try:
-                if not loop:
-                    loop = asyncio.get_event_loop()
                 logger.info("Waiting for streamer on port %d ...", STREAM_PORT)
                 container = av.open(url)
                 logger.info("Streamer connected")
@@ -119,7 +117,7 @@ class StreamTrack(VideoStreamTrack):
                     for frame in packet.decode():
                         if not self._running:
                             return
-                        loop.call_soon_threadsafe(self._put, frame)
+                        self._loop.call_soon_threadsafe(self._put, frame)
                 logger.info("Streamer disconnected, waiting for reconnection...")
             except Exception as e:
                 logger.error("Stream error: %s", e)
@@ -141,12 +139,19 @@ class StreamTrack(VideoStreamTrack):
         return await self._queue.get()
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app):
     global source_track
-    source_track = StreamTrack()
+    loop = asyncio.get_running_loop()
+    source_track = StreamTrack(loop)
     source_track.start()
     logger.info("WebRTC server ready, waiting for streamer on port %d", STREAM_PORT)
+    yield
+    if source_track:
+        source_track.stop()
+
+
+app = FastAPI(title="Desktop Streamer — WebRTC", lifespan=lifespan)
 
 
 @app.get("/", response_class=HTMLResponse)
