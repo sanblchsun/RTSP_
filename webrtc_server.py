@@ -16,7 +16,10 @@ import av
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-STREAM_PORT = int(os.environ.get("STREAM_PORT", "8554"))
+STREAM_URL = os.environ.get(
+    "STREAM_URL",
+    f"tcp://0.0.0.0:8554?listen=1&reuse=1",
+)
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8000"))
 
 relay = MediaRelay()
@@ -106,22 +109,23 @@ class StreamTrack(VideoStreamTrack):
         self._running = False
 
     def _reader(self):
-        url = f"tcp://0.0.0.0:{STREAM_PORT}?listen=1&reuse=1"
+        url = STREAM_URL
         while self._running:
             container = None
             try:
-                logger.info("Waiting for streamer on port %d ...", STREAM_PORT)
+                logger.info("Opening stream: %s", url)
                 container = av.open(url)
-                logger.info("Streamer connected")
+                logger.info("Stream opened")
                 for packet in container.demux(video=0):
                     for frame in packet.decode():
                         if not self._running:
                             return
                         self._loop.call_soon_threadsafe(self._put, frame)
-                logger.info("Streamer disconnected, waiting for reconnection...")
+                logger.info("Stream ended, reconnecting...")
             except Exception as e:
-                logger.error("Stream error: %s", e)
-                time.sleep(1)
+                if self._running:
+                    logger.error("Stream error: %s", e)
+                    time.sleep(1)
             finally:
                 if container:
                     try:
@@ -145,7 +149,7 @@ async def lifespan(app):
     loop = asyncio.get_running_loop()
     source_track = StreamTrack(loop)
     source_track.start()
-    logger.info("WebRTC server ready, waiting for streamer on port %d", STREAM_PORT)
+    logger.info("WebRTC server ready, stream URL: %s", STREAM_URL)
     yield
     if source_track:
         source_track.stop()
