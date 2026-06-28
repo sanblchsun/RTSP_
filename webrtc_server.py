@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 STREAM_URL = os.environ.get(
     "STREAM_URL",
-    f"tcp://0.0.0.0:8554?listen=1&reuse=1",
+    "tcp://0.0.0.0:8554?listen=1&reuse=1",
 )
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8000"))
 
@@ -116,11 +116,20 @@ class StreamTrack(VideoStreamTrack):
                 logger.info("Opening stream: %s", url)
                 container = av.open(url)
                 logger.info("Stream opened")
+
                 for packet in container.demux(video=0):
                     for frame in packet.decode():
                         if not self._running:
                             return
-                        self._loop.call_soon_threadsafe(self._put, frame)
+                        if frame.pts is None:
+                            continue
+
+                        out = frame.reformat()
+                        out.pts = frame.pts
+                        out.time_base = frame.time_base
+
+                        self._loop.call_soon_threadsafe(self._put, out)
+
                 logger.info("Stream ended, reconnecting...")
             except Exception as e:
                 if self._running:
@@ -149,7 +158,7 @@ async def lifespan(app):
     loop = asyncio.get_running_loop()
     source_track = StreamTrack(loop)
     source_track.start()
-    logger.info("WebRTC server ready, stream URL: %s", STREAM_URL)
+    logger.info("Server ready, stream URL: %s", STREAM_URL)
     yield
     if source_track:
         source_track.stop()
