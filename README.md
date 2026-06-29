@@ -1,260 +1,165 @@
 # Desktop Streamer
 
-Трансляция рабочего стола Windows в браузер или плеер через H.264 + WebRTC / RTSP.
+Трансляция рабочего стола Windows в браузер через H.264 + RTSP/RTP + WebRTC.
 
-## Архитектура
-
-Два независимых режима работы:
-
-### Режим 1: Push — через интернет на VPS, в браузер через WebRTC
-
-```
-┌──────────────────────┐     TCP/UDP      ┌───────────────────────┐     WebRTC     ┌─────────┐
-│  Windows (агент)     │ ──────────────>  │  VPS (Linux)          │ ────────────>  │ Браузер │
-│                      │  H.264 annex-B   │                       │                │         │
-│  WGC → x264 →        │                   │  PyAV decode →        │                │  <video>│
-│  TCP/UDP push        │                   │  aiortc WebRTC        │                │         │
-│                      │                   │  FastAPI signalling   │                │         │
-└──────────────────────┘                   └───────────────────────┘                └─────────┘
-```
-
-Агент подключается к VPS (outgoing TCP/UDP), передаёт сжатые H.264 NAL-единицы.
-Сервер декодирует их в кадры и ретранслирует через WebRTC в браузер.
-Подходит для работы через NAT — агенту нужен только исходящий доступ к VPS.
-
-### Режим 2: RTSP — локально в плеер
-
-```
-┌──────────────────────┐    RTSP/RTP      ┌───────────┐
-│  Windows (агент)     │ <──────────────  │  ffplay / │
-│                      │     TCP          │  VLC      │
-│  WGC → x264 →        │  interleaved     │           │
-│  RTSP-сервер         │                  │           │
-└──────────────────────┘                  └───────────┘
-```
-
-Агент сам является RTSP-сервером. Плеер подключается к нему, проходит RTSP-рукопожатие
-и получает RTP-пакеты поверх того же TCP-соединения (interleaved mode).
-Без VPS, без браузера — только Windows + плеер в одной сети.
+Захват экрана (WGC) → кодирование (x264) → RTP-пакетизация (RFC 3984) → RTSP transport → WebRTC.
 
 ---
 
-## Детально: как формируется и передаётся видео
+## Быстрый старт
+
+**1. VPS (Linux):**
+```bash
+pip install fastapi uvicorn[standard] aiortc av
+python webrtc_server.py
+```
+Сервер слушает порт 8554 (RTSP) и 8000 (WebRTC + веб-страница).
+
+**2. Windows (агент):**
+```cmd
+desktop_streamer.exe push <VPS_IP>
+```
+Подключается к VPS, проходит RTSP-рукопожатие, начинает стриминг.
+
+**3. Браузер:** открыть `http://<VPS_IP>:8000`
+
+---
+
+## Архитектура
+
+```
+┌─────────────────────────┐     RTSP + interleaved RTP     ┌───────────────────────────┐     WebRTC     ┌─────────┐
+│  Windows (агент)        │ ──────────────────────────────> │  VPS (Linux, Python)      │ ────────────>  │ Браузер │
+│                         │   TCP :8554                    │                           │                │         │
+│  WGC → x264 →           │   OPTIONS/DESCRIBE/SETUP/PLAY │  RTSP-сервер →            │                │  <video>│
+│  RTP-пакетизатор →      │   $channel length RTP         │  RTP-парсер → PyAV →      │                │         │
+│  RTSP-клиент            │                                │  aiortc WebRTC             │                │         │
+└─────────────────────────┘                                └───────────────────────────┘                └─────────┘
+```
+
+Агент = RTSP-клиент. VPS = RTSP-сервер. После RTSP-рукопожатия видео передаётся как interleaved RTP (RFC 3984) по тому же TCP-соединению. Никаких UDP, никаких сырых NAL.
+
+---
+
+## Режимы работы
+
+### 1. Push на VPS (основной)
+
+Агент подключается к VPS (outgoing TCP), проходит RTSP-рукопожатие и передаёт поток. VPS отдаёт видео через WebRTC в браузер. Единственный порт для входящих подключений — 8000 (HTTP). Агент сам инициирует соединение, поэтому NAT/фаервол не мешают.
+
+### 2. RTSP-сервер (локальный)
+
+```cmd
+desktop_streamer.exe
+```
+
+Агент сам становится RTSP-сервером. Любой RTSP-клиент (ffplay, VLC) подключается и получает поток.
+```
+ffplay -fflags nobuffer rtsp://<IP_АГЕНТА>:8554/stream
+```
+
+---
+
+## Как устроено
 
 ### Захват (WGC)
 
 Windows.Graphics.Capture API (WinRT/C++):
-- Создаётся D3D11-устройство, `Direct3D11CaptureFramePool` с форматом B8G8R8A8
-- Для каждого монитора создаётся `GraphicsCaptureItem` и `GraphicsCaptureSession`
-- `CaptureFrame()`: `pool.TryGetNextFrame()` — неблокирующий, возвращает null если экран не менялся
-- Из кадра извлекается ID3D11Texture2D, копируется в staging-текстуру, пиксели читаются в CPU
+- D3D11-устройство, `Direct3D11CaptureFramePool` с форматом B8G8R8A8
+- `TryGetNextFrame()` — неблокирующий захват, возвращает null если кадр не изменился
+- Копирование текстуры в CPU через staging-ресурс и Map/Unmap
 
 ### Кодирование (x264)
 
-X264Encoder обёртка над libx264:
-- BGRA → I420 (ручная конверсия с BT.601)
-- Параметры: preset=ultrafast, tune=zerolatency, profile=main, CRF=23
-- 30 FPS, `b_annexb=1` (старт-коды 00 00 00 01), `b_repeat_headers=1` (SPS/PPS в каждом IDR)
-- `i_bframe=0`, `i_frame_reference=1`, `i_keyint_max=fps*2`
-- SPS/PPS извлекаются из `x264_encoder_headers()` при инициализации
-
-### Транспорт
-
-Выход x264 — аннекс-B поток: `[00 00 00 01][NAL-заголовок][данные]...`
-
-**TCP (push):** каждый access unit отправляется как:
-```
-[4 байта — размер (big-endian)][NAL data]
-```
-TCP_NODELAY, reconnect при обрыве.
-
-**UDP (push):** фрагментация по 1392 байта на датаграмму:
-```
-[4 байта — seq (BE)][2 байта — frag_index (BE)][2 байта — total_frags (BE)][payload]
-```
-Сервер собирает по seq. Потеря фрагмента = потеря кадра. seq инкрементится на кадр.
-
-**RTSP:** RTP-пакеты (RFC 3984) передаются interleaved поверх TCP:
-```
-[0x24][1 байт — channel][2 байта — длина (BE)][RTP-заголовок 12B][H.264 NAL]
-```
-Пакетизация H.264: Single NAL (≤1400B) или FU-A (>1400B).
-
----
-
-## Детально: что происходит на сервере (push-режим)
-
-### Приём
-
-`TcpRelayReader` / `UdpRelayReader` — отдельные потоки-демоны:
-- TCP: `accept()` → `recv(65536)` → парсинг [4B size][NAL] → `feed_nal()`
-- UDP: `recvfrom()` → сборка фрагментов по seq → `feed_nal()`
-
-### Декодирование
-
-`H264StreamTrack.feed_nal()`:
-- `av.CodecContext('h264').parse(nal_data)` → список пакетов
-- `codec.decode(packet)` → список кадров (VideoFrame)
-- Установка PTS (frame_count, time_base=1/30)
-- Помещение в `asyncio.Queue(maxsize=60)`
-- При переполнении очереди кадры дропаются (put_nowait → QueueFull)
-
-### WebRTC
-
-`H264StreamTrack.recv()` — `await queue.get()`, отдаёт кадр aiortc.
-`MediaRelay.subscribe()` — мультиплексирование на нескольких клиентов.
-Браузер создаёт SDP offer через `POST /offer`, сервер отвечает answer с H.264-треком.
-
----
-
-## Детально: RTSP-сервер (локальный режим)
-
-### Рукопожатие
-
-Клиент (ffplay/VLC) инициирует RTSP over TCP:
-
-1. **OPTIONS** → сервер отвечает списком методов
-2. **DESCRIBE** → сервер генерирует SDP:
-   - `m=video 0 RTP/AVP 96`
-   - `a=rtpmap:96 H264/90000`
-   - `a=fmtp:96 packetization-mode=1;profile-level-id=42C01F;sprop-parameter-sets=<base64 SPS>,<base64 PPS>`
-3. **SETUP** → сервер выбирает transport (TCP interleaved, channel 0-1)
-4. **PLAY** → сервер начинает отправку RTP-пакетов
-5. **TEARDOWN** → завершение
-
-SPS/PPS для SDP берутся из `x264_encoder_headers()`.
+Статически слинкованный libx264 (без DLL):
+- BGRA → I420 (BT.601)
+- `preset=ultrafast`, `tune=zerolatency`, `profile=main`, CRF=23
+- 30 FPS, `b_annexb=1`, `b_repeat_headers=1` (SPS/PPS в каждом IDR)
+- Без B-фреймов, один ref-frame, keyint = 2 секунды
 
 ### RTP-пакетизация (RFC 3984)
 
 `H264RtpPacketizer`:
-- Разбор аннекс-B потока на NAL-единицы
-- **Single NAL** (≤max_payload): `[RTP-заголовок 12B][NAL]`
-- **FU-A** (>max_payload): `[RTP-заголовок][FU indicator][FU header][фрагмент]`
+- Разбор annex-B потока на NAL-единицы (поиск старт-кодов `00 00 00 01`)
+- **Single NAL** (≤1400 байт): `[RTP-заголовок 12 байт][NAL-единица]`
+- **FU-A** (>1400 байт): фрагментация крупных NAL на части, каждая со своим FU indicator + FU header
+- RTP-заголовок: version=2, payload_type=96, SSRC=0xDEADBEEF, sequence инкрементится на каждый пакет, timestamp = 90000/30 на кадр
 
-RTP-заголовок: version=2, payload_type=96, SSRC=0xDEADBEEF,
-sequence инкрементится на каждый пакет, timestamp = 90000/30 на кадр.
+### RTSP-рукопожатие (агент → VPS)
 
-### Interleaved framing
+Агент отправляет последовательно:
+1. `OPTIONS * RTSP/1.0` → сервер отвечает списком методов
+2. `DESCRIBE rtsp://relay/stream` → сервер отвечает SDP с H.264
+3. `SETUP rtsp://relay/stream/trackID=0` → сервер выбирает transport (`RTP/AVP/TCP;interleaved=0-1`)
+4. `PLAY rtsp://relay/stream` → сервер подтверждает готовность
 
-RTP-пакеты передаются поверх того же TCP-соединения (не через UDP):
+После PLAY агент начинает отправлять interleaved RTP:
 ```
-[0x24][channel=0][2B length(BE)][RTP packet]
+[0x24][channel=0][2 байта длина (big-endian)][RTP-пакет]
 ```
-Порт 8554, один клиент, auto-reconnect.
+
+### Декодирование на сервере (Python)
+
+`RtpParser`: разбор RTP-пакетов (Single NAL, FU-A, STAP-A), извлечение H.264 NAL с восстановлением старт-кодов.
+`H264StreamTrack.feed_nal()`: PyAV `codec.parse()` + `codec.decode()` → asyncio.Queue.
+`H264StreamTrack.recv()`: отдаёт кадры aiortc для WebRTC.
+
+### WebRTC
+
+- `GET /` — одностраничный HTML с WebRTC-клиентом (STUN, ICE restart при обрыве)
+- `POST /offer` — SDP offer от браузера → сервер создаёт RTCPeerConnection, добавляет H.264-трек, отвечает answer
+- `MediaRelay` — мультиплексирование на нескольких клиентов
+- ICE: STUN-сервер `stun:stun.l.google.com:19302`
 
 ---
 
-## Компоненты: C++ агент
+## Детали реализации
 
-### `main.cpp`
+### C++ агент (Windows)
 
-Точка входа. Разбор аргументов, инициализация, главный цикл.
+| Компонент | Файл | Назначение |
+|-----------|------|------------|
+| `main.cpp` | `main.cpp` | Аргументы, инициализация, главный цикл, `RtspClient` |
+| `WGCCapture` | `WinRT-API/capture_wgc.h/cpp` | Захват экрана через WinRT |
+| `X264Encoder` | `WinRT-API/encoder_x264.h/cpp` | H.264-кодирование, статический x264 |
+| `H264RtpPacketizer` | `rtp/h264_rtp_packetizer.h/cpp` | RFC 3984: Single NAL, FU-A |
+| `RtspServer` | `rtsp/rtsp_server.h/cpp` | RTSP-сервер (локальный режим) |
+| `RtspClient` | `main.cpp` | RTSP-клиент (push-режим) |
 
-**Аргументы:**
+`RtspClient`: подключается по TCP, проходит OPTIONS/DESCRIBE/SETUP/PLAY, шлёт RTP в формате `$channel length data`.
 
-| Команда | Режим |
-|---------|-------|
-| `desktop_streamer.exe` | RTSP-сервер (порт 8554) |
-| `desktop_streamer.exe push <host>` | TCP push (порт 8554) |
-| `desktop_streamer.exe push <host> <port>` | TCP push (указанный порт) |
-| `desktop_streamer.exe push <host> <port> udp` | UDP push |
-| `desktop_streamer.exe push <host> udp` | UDP push (порт 8554) |
+### Python сервер (VPS)
 
-**Основной цикл (push):**
-```cpp
-while (running) {
-    capture->CaptureFrame(0, bgra, w, h)     // WGC захват
-    encoder->EncodeFrame(bgra, nals)          // x264 кодирование
-    pusher->SendNal(nals.data(), nals.size()) // TCP/UDP отправка
-}
+`webrtc_server.py` — всё в одном файле:
+
+| Класс | Назначение |
+|-------|------------|
+| `H264StreamTrack` | VideoStreamTrack aiortc, приём NAL → PyAV → asyncio.Queue |
+| `RtpParser` | Разбор RTP-пакетов, извлечение H.264 (Single NAL, FU-A, STAP-A) |
+| `AgentSession` | Обработка одного агента: RTSP-рукопожатие, приём interleaved RTP |
+| `RtspServer` | TCP-сервер (поток-демон), принимает агента, запускает AgentSession |
+
+### Формат на проводе (push + WebRTC)
+
+```
+[TCP соединение]
+├── RTSP: OPTIONS / DESCRIBE / SETUP / PLAY (текстовые запросы-ответы)
+└── после PLAY:
+    └── [0x24][0x00][длина BE][RTP-пакет 12 байт + H.264 payload] × N
 ```
 
-**Основной цикл (RTSP):**
-```cpp
-while (running) {
-    capture->CaptureFrame(0, bgra, w, h)
-    encoder->EncodeFrame(bgra, nals)
-    packetizer.Packetize(nals, rtp_ts, rtp_packets) // RTP-пакетизация
-    for (auto &pkt : rtp_packets)
-        rtsp.SendRtp(pkt.data(), pkt.size())  // interleaved отправка
-    rtp_ts += 90000/30
-}
-```
-
-### `WGCCapture` (`capture_wgc.h/cpp`)
-
-Захват экрана через Windows.Graphics.Capture:
-- `Initialize(fps)` — D3D11, перечисление мониторов, создание FramePool и CaptureSession
-- `CaptureFrame(monitor_id, bgra, w, h)` — `TryGetNextFrame()` → CopyResource → Map → memcpy
-- `Shutdown()` — закрытие session/pool, освобождение D3D
-
-### `X264Encoder` (`encoder_x264.h/cpp`)
-
-Обёртка libx264:
-- `Initialize(w, h, fps, qp)` — x264_param_default_preset("ultrafast","zerolatency"), apply_profile("main")
-- `EncodeFrame(bgra, out_nal)` — BGRA→I420, `x264_encoder_encode`, concat NAL в out_nal
-- `GetSps()`/`GetPps()` — параметры из `x264_encoder_headers`
-- `Shutdown()` — `x264_encoder_close`
-
-### `IPushSender` / `TcpPushSender` / `UdpPushSender`
-
-Интерфейс и две реализации транспорта:
-- `TcpPushSender` — blocking `send()`, TCP_NODELAY, reconnect
-- `UdpPushSender` — `sendto()` с фрагментацией, без подтверждений
-
-### `H264RtpPacketizer` (`rtp/h264_rtp_packetizer.h/cpp`)
-
-RFC 3984: Single NAL и FU-A, RTP-заголовок 12 байт.
-
-### `RtspServer` (`rtsp/rtsp_server.h/cpp`)
-
-RTSP/1.0 сервер:
-- `Start(port)` — listen TCP, поток AcceptLoop
-- `HandleOptions/Describe/Setup/Play/Teardown` — обработка запросов
-- `GenerateSdp()` — SDP с H.264 fmtp (profile-level-id + sprop-parameter-sets)
-- `SendRtp(data, size)` — interleaved framing: `$channel length data`
-- Один клиент, auto-kick предыдущего при новом подключении
-
----
-
-## Компоненты: Python VPS
-
-### `webrtc_server.py`
-
-FastAPI + aiortc + PyAV.
-
-### `H264StreamTrack`
-
-`VideoStreamTrack` из aiortc:
-- `feed_nal(nal_data)` — `codec.parse()` + `codec.decode()` → asyncio.Queue
-- `recv()` — `await queue.get()` для WebRTC sender
-
-### `TcpRelayReader`
-
-Поток-демон: TCP-сервер на порту 8554, парсинг `[4B size][NAL]`, вызов `feed_nal`.
-
-### `UdpRelayReader`
-
-Поток-демон: UDP-сокет на порту 8554, сборка фрагментов по seq, вызов `feed_nal`.
-Очистка зависших фрагментов через 5 сек.
-
-### `UdpRelayReader._cleanup_stale()`
-
-Удаляет незавершённые фрагменты старше 5 секунд (потерянные кадры).
-
-### WebRTC signalling
-
-- `GET /` — HTML-страница с WebRTC-клиентом (STUN, ICE restart)
-- `POST /offer` — приём SDP offer, создание `RTCPeerConnection`, `addTrack(relay.subscribe(track))`, ответ answer
-- `GET /health` — healthcheck
+RTP payload — H.264 в соответствии с RFC 3984:
+- PT=96, SSRC=0xDEADBEEF
+- Single NAL для мелких NAL (≤1400 байт)
+- FU-A для крупных NAL (фрагментация)
 
 ---
 
 ## Сборка (Windows)
 
 Требования:
-- Visual Studio 202x (x64) с компонентами "Разработка классических приложений на C++" и "C++/WinRT"
-- [x264 SDK](https://www.videolan.org/developers/x264.html) (статическая библиотека) в `C:\x264_sdk`
+- Visual Studio 202x (x64) с компонентами «Разработка классических приложений на C++» и «C++/WinRT»
+- Статическая libx264 в `C:\x264_sdk`
 - Windows 10 1903+ (WGC API)
 
 ```bash
@@ -264,51 +169,43 @@ cmake --build build64 --config Release
 
 Бинарник: `build64/Release/desktop_streamer.exe`
 
+### Структура `C:\x264_sdk`
+```
+C:\x264_sdk\
+├── include\
+│   └── x264.h
+├── lib\
+│   └── libx264.lib
+```
+
 ---
 
 ## Запуск
 
-### VPS (push-режим)
-
+### VPS
 ```bash
-pip install -r requirements.txt
-# опционально: RELAY_PORT=8554 HTTP_PORT=8000
 python webrtc_server.py
 ```
+Порты: 8554 (RTSP), 8000 (HTTP + WebRTC).
 
-Сервер слушает TCP и UDP на порту 8554 одновременно.
+Переменные окружения:
+- `RTSP_PORT` — порт для RTSP (по умолч. 8554)
+- `HTTP_PORT` — порт для HTTP/WebRTC (по умолч. 8000)
 
-### Агент (push-режим)
-
+### Агент (push на VPS)
 ```cmd
 desktop_streamer.exe push <VPS_IP>
-desktop_streamer.exe push <VPS_IP> 8554 udp
+desktop_streamer.exe push <VPS_IP> 8554
 ```
 
-### Агент (RTSP-режим)
-
+### Агент (локальный RTSP-сервер)
 ```cmd
 desktop_streamer.exe
 ```
+Плеер: `ffplay -fflags nobuffer rtsp://<IP>:8554/stream`
 
-Плеер:
-```bash
-ffplay -fflags nobuffer -flags low_delay rtsp://<AGENT_IP>:8554/stream
-```
-или VLC: `rtsp://<AGENT_IP>:8554/stream`
-
-### Браузер (push-режим)
-
+### Браузер
 Открыть `http://<VPS_IP>:8000`
-
----
-
-## Переменные окружения (сервер)
-
-| Переменная | По умолч. | Описание |
-|-----------|-----------|----------|
-| `RELAY_PORT` | 8554 | Порт для TCP/UDP приёма H.264 |
-| `HTTP_PORT` | 8000 | Порт веб-интерфейса (FastAPI) |
 
 ---
 
@@ -321,6 +218,6 @@ ffplay -fflags nobuffer -flags low_delay rtsp://<AGENT_IP>:8554/stream
 - Winsock2
 
 ### Сервер (Python)
-- `fastapi` + `uvicorn[standard]` — HTTP/WebSocket
+- `fastapi` + `uvicorn[standard]` — HTTP
 - `aiortc` — WebRTC
 - `av` (PyAV) — H.264 декодинг
