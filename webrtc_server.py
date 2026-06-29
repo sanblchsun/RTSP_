@@ -107,10 +107,12 @@ class H264StreamTrack(VideoStreamTrack):
         self._queue = asyncio.Queue(maxsize=60)
         self._running = True
         self._reader_thread = None
+        self._frame_count = 0
+        self._last_log = 0
         # H.264 decoder
         self._codec = av.CodecContext.create('h264', 'r')
         self._codec.extradata = None
-        self._codec.thread_count = 0  # single-thread for low latency
+        self._codec.thread_count = 0
 
     def start(self, reader):
         self._reader_thread = threading.Thread(target=reader.run, daemon=True)
@@ -122,23 +124,24 @@ class H264StreamTrack(VideoStreamTrack):
     def feed_nal(self, nal_data: bytes):
         if not self._running:
             return
+        t0 = time.monotonic()
+        n_frames = 0
         try:
-            packets = self._codec.parse(nal_data)
-            for packet in packets:
+            for packet in self._codec.parse(nal_data):
                 for frame in self._codec.decode(packet):
                     if frame.width is None or frame.height is None:
                         continue
-                    pts = frame.pts if frame.pts is not None else 0
-                    tb = frame.time_base if frame.time_base is not None else fractions.Fraction(1, 90000)
-                    try:
-                        out = frame.reformat(width=frame.width, height=frame.height)
-                    except Exception:
-                        out = frame
-                    out.pts = pts
-                    out.time_base = tb
-                    self._loop.call_soon_threadsafe(self._put, out)
+                    frame.pts = self._frame_count
+                    frame.time_base = fractions.Fraction(1, 30)
+                    self._frame_count += 1
+                    n_frames += 1
+                    self._loop.call_soon_threadsafe(self._put, frame)
         except Exception as e:
             logger.warning("Decode error: %s", e)
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        if n_frames > 0 and elapsed_ms > 10:
+            logger.info("feed_nal: %.1fms, frames=%d, dec=%d, q=%d",
+                        elapsed_ms, self._frame_count, n_frames, self._queue.qsize())
 
 
     def _put(self, frame):
