@@ -6,6 +6,7 @@ Agent network protocol:
   [4-byte NAL size (big-endian)][NAL data (annex-B)]...
 """
 import asyncio
+import fractions
 import logging
 import os
 import socket
@@ -119,18 +120,22 @@ class H264StreamTrack(VideoStreamTrack):
         self._running = False
 
     def feed_nal(self, nal_data: bytes):
-        """Feed H.264 NAL unit (annex-B with start code) to decoder."""
         if not self._running:
             return
         try:
             packets = self._codec.parse(nal_data)
             for packet in packets:
                 for frame in self._codec.decode(packet):
-                    if frame.pts is None:
-                        frame.pts = 0
-                    out = frame.reformat(width=frame.width, height=frame.height)
-                    out.pts = frame.pts
-                    out.time_base = frame.time_base
+                    if frame.width is None or frame.height is None:
+                        continue
+                    pts = frame.pts if frame.pts is not None else 0
+                    tb = frame.time_base if frame.time_base is not None else fractions.Fraction(1, 90000)
+                    try:
+                        out = frame.reformat(width=frame.width, height=frame.height)
+                    except Exception:
+                        out = frame
+                    out.pts = pts
+                    out.time_base = tb
                     self._loop.call_soon_threadsafe(self._put, out)
         except Exception as e:
             logger.warning("Decode error: %s", e)
