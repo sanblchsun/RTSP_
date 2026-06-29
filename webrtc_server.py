@@ -104,6 +104,7 @@ class H264StreamTrack(VideoStreamTrack):
         self._queue = asyncio.Queue(maxsize=60)
         self._running = True
         self._frame_count = 0
+        self._nal_count = 0
         self._codec = av.CodecContext.create('h264', 'r')
         self._codec.extradata = None
         self._codec.thread_count = 0
@@ -114,6 +115,8 @@ class H264StreamTrack(VideoStreamTrack):
     def feed_nal(self, nal_data: bytes):
         if not self._running:
             return
+        self._nal_count += 1
+        nal_type = nal_data[4] & 0x1F if len(nal_data) > 4 else -1
         try:
             for packet in self._codec.parse(nal_data):
                 for frame in self._codec.decode(packet):
@@ -122,9 +125,11 @@ class H264StreamTrack(VideoStreamTrack):
                     frame.pts = self._frame_count
                     frame.time_base = fractions.Fraction(1, 30)
                     self._frame_count += 1
+                    if self._frame_count % 30 == 0:
+                        logger.info("Frames decoded: %d (NALs: %d)", self._frame_count, self._nal_count)
                     self._loop.call_soon_threadsafe(self._put, frame)
         except Exception as e:
-            logger.warning("Decode error: %s", e)
+            logger.warning("Decode error at NAL type %d: %s", nal_type, e)
 
     def _put(self, frame):
         try:
@@ -150,8 +155,10 @@ class RtpParser:
         if len(data) < RTP_HEADER_SIZE:
             return
         if (data[0] >> 6) != 2:
+            logger.warning("Bad version: 0x%02X", data[0])
             return
         if (data[1] & 0x7F) != 96:
+            logger.warning("Bad PT: %d", data[1] & 0x7F)
             return
 
         payload = data[RTP_HEADER_SIZE:]
@@ -167,8 +174,8 @@ class RtpParser:
                 self._handle_stapa(payload)
             elif nal_type <= 23:
                 source_track.feed_nal(START_CODE + payload)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("RTP parse error: %s", e)
 
     def _handle_fua(self, payload: bytes):
         header = payload[1]
@@ -224,6 +231,7 @@ class AgentSession:
         logger.info("Agent connected: %s", self._addr[0])
         session_id = "12345678"
 
+        self._rtp_count = 0
         while self._running:
             try:
                 data = self._conn.recv(65536)
@@ -243,6 +251,9 @@ class AgentSession:
                     rtp = self._buf[4:4 + pkt_len]
                     self._buf = self._buf[4 + pkt_len:]
                     if self._play_sent:
+                        self._rtp_count += 1
+                        if self._rtp_count % 300 == 0:
+                            logger.info("RTP packets received: %d", self._rtp_count)
                         self._parser.feed_rtp(rtp)
                     continue
 
