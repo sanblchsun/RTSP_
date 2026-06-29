@@ -110,7 +110,7 @@ class H264StreamTrack(VideoStreamTrack):
         self._codec.thread_count = 0  # single-thread for low latency
 
     def start(self, reader):
-        self._reader_thread = reader
+        self._reader_thread = threading.Thread(target=reader.run, daemon=True)
         self._reader_thread.start()
 
     def stop(self):
