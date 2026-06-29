@@ -71,6 +71,7 @@ bool X264Encoder::Initialize(int width, int height, int fps, int qp)
 
     // NAL HRD conformance + AUD
     m_params.b_repeat_headers = 1;
+    m_params.b_annexb = 1;
     m_params.b_aud = 1;
 
     m_params.i_sps_id = 0;
@@ -95,12 +96,34 @@ bool X264Encoder::Initialize(int width, int height, int fps, int qp)
 
     m_frame_count = 0;
 
-    // Get SPS/PPS and log actual params
-    x264_nal_t *nals;
-    int i_nals;
-    x264_encoder_headers(m_encoder, &nals, &i_nals);
-    logf("[x264] encoder initialized: %dx%d %dfps qp=%d",
-         width, height, fps, qp);
+    // Save SPS/PPS from encoder headers
+    m_sps.clear();
+    m_pps.clear();
+    {
+        x264_nal_t *nals;
+        int i_nals;
+        x264_encoder_headers(m_encoder, &nals, &i_nals);
+        for (int i = 0; i < i_nals; i++)
+        {
+            const uint8_t *p = nals[i].p_payload;
+            int sz = nals[i].i_payload;
+            // Skip annex-B start code (3 or 4 bytes)
+            int offset = 0;
+            if (sz >= 4 && p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 1)
+                offset = 4;
+            else if (sz >= 3 && p[0] == 0 && p[1] == 0 && p[2] == 1)
+                offset = 3;
+            else
+                continue;
+            uint8_t type = p[offset] & 0x1F;
+            if (type == 7)
+                m_sps.assign(p, p + sz);
+            else if (type == 8)
+                m_pps.assign(p, p + sz);
+        }
+    }
+    logf("[x264] encoder initialized: %dx%d %dfps qp=%d sps=%zu pps=%zu",
+         width, height, fps, qp, m_sps.size(), m_pps.size());
 
     return true;
 }

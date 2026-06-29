@@ -132,8 +132,9 @@ class H264StreamTrack(VideoStreamTrack):
                     out.pts = frame.pts
                     out.time_base = frame.time_base
                     self._loop.call_soon_threadsafe(self._put, out)
-        except av.AVError as e:
+        except Exception as e:
             logger.warning("Decode error: %s", e)
+
 
     def _put(self, frame):
         try:

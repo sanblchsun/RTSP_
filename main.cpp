@@ -200,32 +200,26 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // ---- Capture first frame for SPS/PPS ----
-    auto capture_first_frame = [&]() -> bool {
-        std::vector<uint8_t> bgra, nals;
+    // ---- Get SPS/PPS from encoder headers ----
+    std::vector<uint8_t> sps = encoder->GetSps();
+    std::vector<uint8_t> pps = encoder->GetPps();
+    if (sps.empty() || pps.empty())
+    {
+        // Fallback: capture first frame and extract
+        std::vector<uint8_t> bgra, first_nals;
         int fw = 0, fh = 0;
         for (int i = 0; i < 60 && g_running.load(); i++)
         {
             if (capture->CaptureFrame(0, bgra, fw, fh))
             {
-                nals.clear();
-                if (encoder->EncodeFrame(bgra, nals) && !nals.empty())
-                    return true;
+                first_nals.clear();
+                if (encoder->EncodeFrame(bgra, first_nals) && !first_nals.empty())
+                {
+                    extract_sps_pps(first_nals, sps, pps);
+                    break;
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
-        }
-        return false;
-    };
-
-    std::vector<uint8_t> sps, pps;
-    {
-        std::vector<uint8_t> bgra2, nals2;
-        int fw2, fh2;
-        if (capture_first_frame())
-        {
-            capture->CaptureFrame(0, bgra2, fw2, fh2);
-            encoder->EncodeFrame(bgra2, nals2);
-            extract_sps_pps(nals2, sps, pps);
         }
     }
     std::cout << "SPS: " << sps.size() << " PPS: " << pps.size() << std::endl;
