@@ -8,7 +8,9 @@ Agent network protocol:
 import asyncio
 import logging
 import os
+import socket
 import struct
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -211,9 +213,6 @@ class TcpRelayReader:
                         server.close()
                     except Exception:
                         pass
-
-
-import socket  # noqa: E402 (needed for the relay reader)
 
 
 @asynccontextmanager
