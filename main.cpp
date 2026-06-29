@@ -13,6 +13,9 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <string>
+#include <atomic>
+#include <memory>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -34,9 +37,6 @@
 #endif
 
 static std::atomic<bool> g_running{true};
-static std::string vps_host;
-static int vps_port = 8554;
-static bool use_udp = false;
 
 void signal_handler(int)
 {
@@ -44,7 +44,6 @@ void signal_handler(int)
     g_running.store(false);
 }
 
-// ---- init winsock (safe to call multiple times) ----
 #ifdef _WIN32
 static bool ensure_winsock()
 {
@@ -56,22 +55,15 @@ static bool ensure_winsock()
 static bool ensure_winsock() { return true; }
 #endif
 
-// ---- Interface for push transport ----
-struct IPushSender
-{
-    virtual bool Connect(const std::string &host, int port) = 0;
-    virtual void Disconnect() = 0;
-    virtual bool SendNal(const uint8_t *data, size_t size) = 0;
-    virtual ~IPushSender() = default;
-};
-
-// ---- H.264 NAL over TCP sender ----
-class TcpPushSender : public IPushSender
+// ---- RTSP client (push mode) ----
+class RtspClient
 {
 public:
-    ~TcpPushSender() override { Disconnect(); }
+    ~RtspClient() { Disconnect(); }
 
-    bool Connect(const std::string &host, int port) override
+    bool HandshakeDone() const { return handshake_done_; }
+
+    bool Connect(const std::string &host, int port)
     {
         Disconnect();
         ensure_winsock();
@@ -96,8 +88,9 @@ public:
         return true;
     }
 
-    void Disconnect() override
+    void Disconnect()
     {
+        handshake_done_ = false;
         if (sock_ != INVALID_SOCKET)
         {
             closesocket(sock_);
@@ -105,11 +98,39 @@ public:
         }
     }
 
-    bool SendNal(const uint8_t *data, size_t size) override
+    bool Handshake()
+    {
+        // OPTIONS
+        send_req("OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n");
+        if (!recv_resp()) return false;
+
+        // DESCRIBE
+        send_req("DESCRIBE rtsp://relay/stream RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n");
+        if (!recv_resp()) return false;
+
+        // SETUP
+        send_req("SETUP rtsp://relay/stream/trackID=0 RTSP/1.0\r\n"
+                 "CSeq: 3\r\nTransport: RTP/AVP/TCP;interleaved=0-1\r\n\r\n");
+        if (!recv_resp()) return false;
+
+        // PLAY
+        send_req("PLAY rtsp://relay/stream RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n");
+        if (!recv_resp()) return false;
+
+        handshake_done_ = true;
+        std::cout << "RTSP handshake OK" << std::endl;
+        return true;
+    }
+
+    bool SendRtp(const uint8_t *data, size_t size)
     {
         if (sock_ == INVALID_SOCKET) return false;
-        uint32_t net_size = htonl((uint32_t)size);
-        int r = (int)send(sock_, (const char*)&net_size, 4, 0);
+        uint8_t header[4];
+        header[0] = '$';
+        header[1] = 0;                     // channel 0
+        header[2] = (uint8_t)((size >> 8) & 0xFF);
+        header[3] = (uint8_t)(size & 0xFF);
+        int r = (int)send(sock_, (const char*)header, 4, 0);
         if (r <= 0) return false;
         r = (int)send(sock_, (const char*)data, (int)size, 0);
         return r > 0;
@@ -117,76 +138,23 @@ public:
 
 private:
     SOCKET sock_ = INVALID_SOCKET;
-};
+    bool handshake_done_ = false;
+    char recv_buf_[4096];
 
-// ---- H.264 NAL over UDP sender (fragmented) ----
-class UdpPushSender : public IPushSender
-{
-public:
-    ~UdpPushSender() override { Disconnect(); }
-
-    bool Connect(const std::string &host, int port) override
+    void send_req(const std::string &req)
     {
-        Disconnect();
-        ensure_winsock();
-
-        sock_ = socket(AF_INET, SOCK_DGRAM, 0);
-        if (sock_ == INVALID_SOCKET) return false;
-
-        dest_addr_.sin_family = AF_INET;
-        dest_addr_.sin_port = htons((uint16_t)port);
-        inet_pton(AF_INET, host.c_str(), &dest_addr_.sin_addr);
-        return true;
+        send(sock_, req.c_str(), (int)req.size(), 0);
     }
 
-    void Disconnect() override
+    bool recv_resp()
     {
-        if (sock_ != INVALID_SOCKET)
-        {
-            closesocket(sock_);
-            sock_ = INVALID_SOCKET;
-        }
+        int n = (int)recv(sock_, recv_buf_, sizeof(recv_buf_) - 1, 0);
+        if (n <= 0) return false;
+        recv_buf_[n] = 0;
+        // Accept any 200 OK response
+        if (strstr(recv_buf_, "200 OK")) return true;
+        return false;
     }
-
-    bool SendNal(const uint8_t *data, size_t size) override
-    {
-        if (sock_ == INVALID_SOCKET) return false;
-
-        const int frag_payload = MAX_PAYLOAD - HEADER_SIZE;
-        uint16_t total_frags = (uint16_t)((size + frag_payload - 1) / frag_payload);
-        if (total_frags == 0) total_frags = 1;
-
-        uint8_t buf[MAX_PAYLOAD];
-
-        for (uint16_t i = 0; i < total_frags; i++)
-        {
-            size_t off = i * frag_payload;
-            size_t chunk = (std::min)(size - off, (size_t)frag_payload);
-
-            // Header: seq, index, total
-            uint32_t nbo_seq = htonl(seq_);
-            uint16_t nbo_idx = htons(i);
-            uint16_t nbo_tot = htons(total_frags);
-            memcpy(buf, &nbo_seq, 4);
-            memcpy(buf + 4, &nbo_idx, 2);
-            memcpy(buf + 6, &nbo_tot, 2);
-            memcpy(buf + HEADER_SIZE, data + off, chunk);
-
-            int r = (int)sendto(sock_, (const char*)buf, HEADER_SIZE + (int)chunk, 0,
-                                (sockaddr*)&dest_addr_, sizeof(dest_addr_));
-            if (r < 0)
-                return false;
-        }
-        seq_++;
-        return true;
-    }
-
-private:
-    SOCKET sock_ = INVALID_SOCKET;
-    sockaddr_in dest_addr_{};
-    uint32_t seq_ = 0;
-    static const int MAX_PAYLOAD = 1400;
-    static const int HEADER_SIZE = 8; // seq(4) + frag_index(2) + total_frags(2)
 };
 
 // Extract SPS/PPS from encoded NAL data
@@ -238,9 +206,8 @@ static bool extract_sps_pps(const std::vector<uint8_t> &nal_data,
 static void print_usage(const char *prog)
 {
     std::cout << "Usage:\n"
-              << "  " << prog << "                         # RTSP server mode (local)\n"
-              << "  " << prog << " push <vps_ip> [port]    # Push to VPS (TCP, default port 8554)\n"
-              << "  " << prog << " push <vps_ip> [port] udp # Push to VPS (UDP)\n";
+              << "  " << prog << "                         # RTSP server mode (local, ffplay)\n"
+              << "  " << prog << " push <vps_ip> [port]    # Push to VPS (TCP, default " << 8554 << ")\n";
 }
 
 int main(int argc, char *argv[])
@@ -249,6 +216,8 @@ int main(int argc, char *argv[])
     signal(SIGTERM, signal_handler);
 
     bool push_mode = false;
+    std::string vps_host;
+    int vps_port = 8554;
 
     if (argc > 1)
     {
@@ -258,19 +227,7 @@ int main(int argc, char *argv[])
             push_mode = true;
             vps_host = argv[2];
             if (argc > 3)
-            {
-                std::string arg3 = argv[3];
-                if (arg3 == "udp")
-                {
-                    use_udp = true;
-                }
-                else
-                {
-                    vps_port = std::atoi(argv[3]);
-                    if (argc > 4 && std::string(argv[4]) == "udp")
-                        use_udp = true;
-                }
-            }
+                vps_port = std::atoi(argv[3]);
         }
         else
         {
@@ -329,39 +286,24 @@ int main(int argc, char *argv[])
     packetizer.SetSsrc(0xDEADBEEF);
 
     RtspServer rtsp;
-    bool push_ready = false;
-    bool rtsp_ready = false;
-    std::unique_ptr<IPushSender> pusher;
+    RtspClient rtsp_client;
 
     if (push_mode)
     {
-        if (use_udp)
-        {
-            pusher = std::make_unique<UdpPushSender>();
-            std::cout << "Push mode: UDP to " << vps_host << ":" << vps_port << std::endl;
-        }
-        else
-        {
-            pusher = std::make_unique<TcpPushSender>();
-            std::cout << "Push mode: TCP to " << vps_host << ":" << vps_port << std::endl;
-        }
-
-        if (!pusher->Connect(vps_host, vps_port))
-            std::cerr << "Push connect failed (will retry)" << std::endl;
-        else
-            push_ready = true;
+        std::cout << "Push mode: RTSP to " << vps_host << ":" << vps_port << std::endl;
     }
     else
     {
-        std::cout << "RTSP server mode" << std::endl;
+        std::cout << "RTSP server mode (local)" << std::endl;
         rtsp.SetLogCallback([](const std::string &msg) {
             std::cout << "[rtsp] " << msg << std::endl;
         });
         if (!sps.empty() && !pps.empty())
             rtsp.SetVideoParams(w, h, sps, pps, 30);
-        rtsp_ready = rtsp.Start(8554);
-        if (rtsp_ready)
+        if (rtsp.Start(8554))
             std::cout << "RTSP ready on port 8554" << std::endl;
+        else
+            std::cerr << "RTSP start failed" << std::endl;
     }
 
     // ---- Main loop ----
@@ -389,29 +331,47 @@ int main(int argc, char *argv[])
         if (nals.empty())
             continue;
 
+        // RTP packetize (both modes)
+        packetizer.Packetize(nals.data(), nals.size(), rtp_ts, rtp_packets);
+        rtp_ts += rtp_ts_step;
+
         if (push_mode)
         {
-            if (!pusher->SendNal(nals.data(), nals.size()))
+            // Auto-connect on first frame
+            if (!rtsp_client.HandshakeDone())
             {
-                std::cout << "VPS disconnected, reconnecting..." << std::endl;
-                pusher->Disconnect();
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                push_ready = pusher->Connect(vps_host, vps_port);
-                if (push_ready)
-                    pusher->SendNal(nals.data(), nals.size());
+                if (rtsp_client.Connect(vps_host, vps_port))
+                {
+                    if (!rtsp_client.Handshake())
+                    {
+                        std::cout << "RTSP handshake failed, retrying in 1s..." << std::endl;
+                        rtsp_client.Disconnect();
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        continue;
+                    }
+                }
+                else
+                {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
+            }
+
+            for (const auto &pkt : rtp_packets)
+            {
+                if (!rtsp_client.SendRtp(pkt.data(), pkt.size()))
+                {
+                    std::cout << "VPS disconnected, reconnecting..." << std::endl;
+                    rtsp_client.Disconnect();
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    break;
+                }
             }
         }
-        else
+        else if (rtsp.IsClientConnected())
         {
-            // RTSP mode: RTP packetize + send
-            packetizer.Packetize(nals.data(), nals.size(), rtp_ts, rtp_packets);
-            rtp_ts += rtp_ts_step;
-
-            if (rtsp.IsClientConnected())
-            {
-                for (const auto &pkt : rtp_packets)
-                    rtsp.SendRtp(pkt.data(), pkt.size());
-            }
+            for (const auto &pkt : rtp_packets)
+                rtsp.SendRtp(pkt.data(), pkt.size());
         }
 
         frame_count++;
@@ -423,7 +383,7 @@ int main(int argc, char *argv[])
     }
 
     rtsp.Stop();
-    if (pusher) pusher->Disconnect();
+    rtsp_client.Disconnect();
     encoder->Shutdown();
     capture->Shutdown();
     std::cout << "\nDone. " << frame_count << " frames" << std::endl;

@@ -1,9 +1,6 @@
 """
 VPS WebRTC Relay Server
-Receives H.264 NALs over TCP and relays via WebRTC to browsers.
-
-Agent network protocol:
-  [4-byte NAL size (big-endian)][NAL data (annex-B)]...
+Accepts agent as RTSP client → interleaved RTP → H.264 → WebRTC → browser.
 """
 import asyncio
 import fractions
@@ -26,7 +23,7 @@ from aiortc.contrib.media import MediaRelay
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-RELAY_PORT = int(os.environ.get("RELAY_PORT", "8554"))
+RTSP_PORT = int(os.environ.get("RTSP_PORT", "8554"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8000"))
 
 relay = MediaRelay()
@@ -106,17 +103,10 @@ class H264StreamTrack(VideoStreamTrack):
         self._loop = loop
         self._queue = asyncio.Queue(maxsize=60)
         self._running = True
-        self._reader_thread = None
         self._frame_count = 0
-        self._last_log = 0
-        # H.264 decoder
         self._codec = av.CodecContext.create('h264', 'r')
         self._codec.extradata = None
         self._codec.thread_count = 0
-
-    def start(self, reader):
-        self._reader_thread = threading.Thread(target=reader.run, daemon=True)
-        self._reader_thread.start()
 
     def stop(self):
         self._running = False
@@ -124,8 +114,6 @@ class H264StreamTrack(VideoStreamTrack):
     def feed_nal(self, nal_data: bytes):
         if not self._running:
             return
-        t0 = time.monotonic()
-        n_frames = 0
         try:
             for packet in self._codec.parse(nal_data):
                 for frame in self._codec.decode(packet):
@@ -134,15 +122,9 @@ class H264StreamTrack(VideoStreamTrack):
                     frame.pts = self._frame_count
                     frame.time_base = fractions.Fraction(1, 30)
                     self._frame_count += 1
-                    n_frames += 1
                     self._loop.call_soon_threadsafe(self._put, frame)
         except Exception as e:
             logger.warning("Decode error: %s", e)
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        if n_frames > 0 and elapsed_ms > 10:
-            logger.info("feed_nal: %.1fms, frames=%d, dec=%d, q=%d",
-                        elapsed_ms, self._frame_count, n_frames, self._queue.qsize())
-
 
     def _put(self, frame):
         try:
@@ -154,79 +136,162 @@ class H264StreamTrack(VideoStreamTrack):
         return await self._queue.get()
 
 
-class UdpRelayReader:
-    """Receives fragmented H.264 NALs from UDP and feeds to track."""
+RTP_HEADER_SIZE = 12
+START_CODE = b'\x00\x00\x00\x01'
 
-    HEADER_SIZE = 8  # seq(4) + frag_index(2) + total_frags(2)
 
-    def __init__(self, track: H264StreamTrack):
-        self._track = track
-        self._running = False
-        self._frags = {}  # seq -> { total, chunks: [bytes], count }
+class RtpParser:
+    """Parses interleaved RTP → H.264 NALs → feed_nal."""
 
-    def stop(self):
-        self._running = False
+    def __init__(self):
+        self._fua_buf = None
 
-    def run(self):
+    def feed_rtp(self, data: bytes):
+        if len(data) < RTP_HEADER_SIZE:
+            return
+        if (data[0] >> 6) != 2:
+            return
+        if (data[1] & 0x7F) != 96:
+            return
+
+        payload = data[RTP_HEADER_SIZE:]
+        if not payload:
+            return
+
+        nal_type = payload[0] & 0x1F
+
+        try:
+            if nal_type == 28:
+                self._handle_fua(payload)
+            elif nal_type == 24:
+                self._handle_stapa(payload)
+            elif nal_type <= 23:
+                source_track.feed_nal(START_CODE + payload)
+        except Exception:
+            pass
+
+    def _handle_fua(self, payload: bytes):
+        header = payload[1]
+        start = (header >> 7) & 1
+        end = (header >> 6) & 1
+        orig_type = header & 0x1F
+        fragment = payload[2:]
+
+        if start:
+            self._fua_buf = bytearray()
+            nal_header = bytes([(payload[0] & 0xE0) | orig_type])
+            self._fua_buf.extend(START_CODE)
+            self._fua_buf.extend(nal_header)
+            self._fua_buf.extend(fragment)
+        elif self._fua_buf is not None:
+            self._fua_buf.extend(fragment)
+            if end:
+                source_track.feed_nal(bytes(self._fua_buf))
+                self._fua_buf = None
+
+    def _handle_stapa(self, payload: bytes):
+        offset = 1
+        while offset + 2 <= len(payload):
+            nalu_size = struct.unpack('>H', payload[offset:offset+2])[0]
+            offset += 2
+            if offset + nalu_size > len(payload):
+                break
+            source_track.feed_nal(START_CODE + payload[offset:offset+nalu_size])
+            offset += nalu_size
+
+
+# === RTSP server (agent connection) ===
+
+class AgentSession:
+    """Handles one agent via RTSP + interleaved RTP."""
+
+    def __init__(self, conn, addr):
+        self._conn = conn
+        self._addr = addr
+        self._cseq = 1
+        self._buf = b""
         self._running = True
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(('0.0.0.0', RELAY_PORT))
-        sock.settimeout(1.0)
-        logger.info("UDP relay listening on port %d", RELAY_PORT)
+        self._parser = RtpParser()
 
+    def close(self):
+        self._running = False
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def handle(self):
+        logger.info("Agent connected: %s", self._addr[0])
+        self._send("RTSP/1.0 200 OK\r\nCSeq: 1\r\nServer: desktop-relay\r\n\r\n")
+        self._send(
+            "RTSP/1.0 200 OK\r\nCSeq: 1\r\n"
+            "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n\r\n"
+        )
+
+        sdp = (
+            "v=0\r\no=- 0 1 IN IP4 0.0.0.0\r\ns=Desktop Stream\r\n"
+            "c=IN IP4 0.0.0.0\r\nt=0 0\r\n"
+            "m=video 0 RTP/AVP 96\r\n"
+            "a=rtpmap:96 H264/90000\r\n"
+            "a=fmtp:96 packetization-mode=1;profile-level-id=42C01F\r\n"
+            "a=control:trackID=0\r\n\r\n"
+        )
+        self._send(
+            f"RTSP/1.0 200 OK\r\nCSeq: 1\r\n"
+            f"Content-Type: application/sdp\r\n"
+            f"Content-Length: {len(sdp)}\r\n\r\n{sdp}"
+        )
+        self._send(
+            f"RTSP/1.0 200 OK\r\nCSeq: 1\r\n"
+            f"Transport: RTP/AVP/TCP;interleaved=0-1\r\n"
+            f"Session: 12345678\r\n\r\n"
+        )
+        self._send(
+            f"RTSP/1.0 200 OK\r\nCSeq: 1\r\n"
+            f"Session: 12345678\r\nRTP-Info: url=trackID=0\r\n\r\n"
+        )
+
+        logger.info("RTSP handshake complete, receiving RTP stream")
+        self._receive_rtp()
+        logger.info("Agent disconnected: %s", self._addr[0])
+
+    def _receive_rtp(self):
         while self._running:
             try:
-                data, addr = sock.recvfrom(65536)
-            except socket.timeout:
-                self._cleanup_stale(5.0)
-                continue
+                data = self._conn.recv(65536)
             except Exception:
                 break
+            if not data:
+                break
 
-            if len(data) < self.HEADER_SIZE:
-                continue
+            self._buf += data
 
-            seq = struct.unpack('>I', data[:4])[0]
-            frag_idx = struct.unpack('>H', data[4:6])[0]
-            frag_total = struct.unpack('>H', data[6:8])[0]
-            payload = data[self.HEADER_SIZE:]
+            while True:
+                if len(self._buf) < 4:
+                    break
+                if self._buf[0] != 0x24:
+                    logger.warning("Bad interleaved marker: 0x%02X", self._buf[0])
+                    self._buf = self._buf[1:]
+                    continue
+                channel = self._buf[1]
+                pkt_len = struct.unpack('>H', self._buf[2:4])[0]
+                if len(self._buf) < 4 + pkt_len:
+                    break
+                rtp = self._buf[4:4 + pkt_len]
+                self._buf = self._buf[4 + pkt_len:]
+                self._parser.feed_rtp(rtp)
 
-            if frag_total == 0:
-                continue
-
-            if seq not in self._frags:
-                self._frags[seq] = {
-                    'total': frag_total,
-                    'chunks': [None] * frag_total,
-                    'count': 0,
-                    'time': time.monotonic(),
-                }
-
-            entry = self._frags[seq]
-            if frag_idx < frag_total and entry['chunks'][frag_idx] is None:
-                entry['chunks'][frag_idx] = payload
-                entry['count'] += 1
-
-            if entry['count'] == frag_total:
-                nal = b''.join(entry['chunks'])
-                del self._frags[seq]
-                self._track.feed_nal(nal)
-
-        sock.close()
-
-    def _cleanup_stale(self, timeout: float):
-        now = time.monotonic()
-        stale = [s for s, e in self._frags.items() if now - e['time'] > timeout]
-        for s in stale:
-            del self._frags[s]
+    def _send(self, response: str):
+        try:
+            self._conn.sendall(response.encode("utf-8"))
+        except Exception:
+            self._running = False
 
 
-class TcpRelayReader:
-    """Reads H.264 NALs from TCP and feeds to track."""
+class RtspServer:
+    """Accepts agent TCP connection, runs RTSP handshake + RTP relay."""
 
-    def __init__(self, track: H264StreamTrack):
-        self._track = track
+    def __init__(self):
         self._running = False
 
     def stop(self):
@@ -239,48 +304,21 @@ class TcpRelayReader:
             try:
                 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                server.bind(('0.0.0.0', RELAY_PORT))
+                server.bind(('0.0.0.0', RTSP_PORT))
                 server.listen(1)
-                server.settimeout(5.0)
-                logger.info("TCP relay listening on port %d", RELAY_PORT)
+                server.settimeout(1.0)
+                logger.info("RTSP server on port %d (waiting for agent)", RTSP_PORT)
 
                 while self._running:
                     try:
                         conn, addr = server.accept()
                     except socket.timeout:
                         continue
-                    logger.info("Agent connected: %s", addr[0])
-                    conn.settimeout(None)
-
-                    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
-                    buf = b""
-                    while self._running:
-                        try:
-                            data = conn.recv(65536)
-                        except Exception:
-                            break
-                        if not data:
-                            break
-
-                        buf += data
-                        while len(buf) >= 4:
-                            size = struct.unpack('>I', buf[:4])[0]
-                            if size == 0:
-                                buf = buf[4:]
-                                continue
-                            if len(buf) < 4 + size:
-                                break
-                            nal = buf[4:4 + size]
-                            buf = buf[4 + size:]
-                            self._track.feed_nal(nal)
-
-                    logger.info("Agent disconnected")
-                    conn.close()
+                    AgentSession(conn, addr).handle()
 
             except Exception as e:
                 if self._running:
-                    logger.error("TCP relay error: %s", e)
+                    logger.error("RTSP error: %s", e)
                     time.sleep(1)
             finally:
                 if server:
@@ -290,22 +328,20 @@ class TcpRelayReader:
                         pass
 
 
+# === FastAPI app ===
+
 @asynccontextmanager
 async def lifespan(app):
     global source_track
     loop = asyncio.get_running_loop()
     source_track = H264StreamTrack(loop)
-    tcp_reader = TcpRelayReader(source_track)
-    udp_reader = UdpRelayReader(source_track)
-    # Start both readers in separate threads
-    source_track.start(tcp_reader)
-    t = threading.Thread(target=udp_reader.run, daemon=True)
-    t.start()
-    logger.info("VPS relay ready on port %d (TCP+UDP)", RELAY_PORT)
+
+    rtsp = RtspServer()
+    threading.Thread(target=rtsp.run, daemon=True).start()
+    logger.info("VPS ready — RTSP on %d, WebRTC on %d", RTSP_PORT, HTTP_PORT)
     yield
     source_track.stop()
-    tcp_reader.stop()
-    udp_reader.stop()
+    rtsp.stop()
 
 
 app = FastAPI(title="VPS Desktop Stream — WebRTC", lifespan=lifespan)
