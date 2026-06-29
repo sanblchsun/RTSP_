@@ -1,93 +1,98 @@
 cmake_minimum_required(VERSION 3.10)
-project(DesktopStreamer)
+project(desktop_streamer)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Поиск FFmpeg
-find_program(FFMPEG_EXECUTABLE ffmpeg)
-if(NOT FFMPEG_EXECUTABLE)
-    message(FATAL_ERROR "FFmpeg не найден в PATH")
-endif()
-
-# Получаем путь к FFmpeg
-get_filename_component(FFMPEG_BIN_DIR ${FFMPEG_EXECUTABLE} DIRECTORY)
-get_filename_component(FFMPEG_ROOT ${FFMPEG_BIN_DIR} DIRECTORY)
-
-message(STATUS "Найден FFmpeg: ${FFMPEG_EXECUTABLE}")
-message(STATUS "FFmpeg root: ${FFMPEG_ROOT}")
-
-# Устанавливаем пути
-set(FFMPEG_INCLUDE_DIR "${FFMPEG_ROOT}/include")
-set(FFMPEG_LIB_DIR "${FFMPEG_ROOT}/lib")
-
-# Проверяем существование директорий
-if(NOT EXISTS ${FFMPEG_INCLUDE_DIR})
-    message(FATAL_ERROR "FFmpeg include directory не найден: ${FFMPEG_INCLUDE_DIR}")
-endif()
-
-if(NOT EXISTS ${FFMPEG_LIB_DIR})
-    message(FATAL_ERROR "FFmpeg lib directory не найден: ${FFMPEG_LIB_DIR}")
-endif()
-
-# Исходные файлы
-set(SOURCES
-    desktop_streamer.cpp
-    main.cpp
+find_program(X264_EXECUTABLE x264
+    PATHS "C:/x264_sdk/bin/x64"
 )
+if(NOT X264_EXECUTABLE)
+    message(FATAL_ERROR "x264 not found. Install x264 SDK or add to PATH")
+endif()
 
+get_filename_component(X264_BIN_DIR ${X264_EXECUTABLE} DIRECTORY)
+set(X264_CANDIDATE ${X264_BIN_DIR})
+set(X264_ROOT "")
+foreach(i RANGE 5)
+    if(EXISTS "${X264_CANDIDATE}/include/x264.h")
+        set(X264_ROOT ${X264_CANDIDATE})
+        break()
+    endif()
+    get_filename_component(X264_CANDIDATE "${X264_CANDIDATE}" DIRECTORY)
+endforeach()
+if(NOT X264_ROOT)
+    get_filename_component(X264_ROOT ${X264_BIN_DIR} DIRECTORY)
+endif()
+
+message(STATUS "x264 root: ${X264_ROOT}")
+set(X264_INCLUDE_DIR "${X264_ROOT}/include")
+set(X264_LIB_DIR "${X264_ROOT}/lib")
+
+if(NOT EXISTS ${X264_INCLUDE_DIR})
+    message(FATAL_ERROR "x264 include not found: ${X264_INCLUDE_DIR}")
+endif()
+if(NOT EXISTS ${X264_LIB_DIR})
+    message(FATAL_ERROR "x264 lib not found: ${X264_LIB_DIR}")
+endif()
+
+set(SOURCES
+    main.cpp
+    desktop_streamer.cpp
+    WinRT-API/capture_wgc.cpp
+    WinRT-API/encoder_x264.cpp
+    rtp/h264_rtp_packetizer.cpp
+    rtsp/rtsp_server.cpp
+)
 set(HEADERS
     desktop_streamer.h
-    main.h
+    WinRT-API/capture_base.h
+    WinRT-API/capture_wgc.h
+    WinRT-API/encoder.h
+    WinRT-API/encoder_x264.h
+    rtp/rtp_header.h
+    rtp/h264_rtp_packetizer.h
+    rtsp/rtsp_server.h
 )
 
 add_executable(desktop_streamer ${SOURCES} ${HEADERS})
 
-target_include_directories(desktop_streamer PRIVATE ${FFMPEG_INCLUDE_DIR})
-
-# Линковка библиотек FFmpeg
-target_link_libraries(desktop_streamer
-    ${FFMPEG_LIB_DIR}/avcodec.lib
-    ${FFMPEG_LIB_DIR}/avformat.lib
-    ${FFMPEG_LIB_DIR}/avutil.lib
-    ${FFMPEG_LIB_DIR}/avdevice.lib
-    ${FFMPEG_LIB_DIR}/swscale.lib
-    ${FFMPEG_LIB_DIR}/swresample.lib
+target_include_directories(desktop_streamer PRIVATE
+    ${X264_INCLUDE_DIR}
+    ${CMAKE_SOURCE_DIR}
 )
 
-# Системные библиотеки Windows
+find_library(X264_LIBRARY libx264 PATHS ${X264_LIB_DIR} "${X264_LIB_DIR}/x64" "C:/x264_sdk/lib/x64" NO_DEFAULT_PATH)
+if(NOT X264_LIBRARY)
+    find_library(X264_LIBRARY x264 PATHS ${X264_LIB_DIR} "${X264_LIB_DIR}/x64" NO_DEFAULT_PATH)
+endif()
+if(NOT X264_LIBRARY)
+    message(FATAL_ERROR "x264 library not found in ${X264_LIB_DIR}")
+endif()
+
+target_link_libraries(desktop_streamer ${X264_LIBRARY})
+
 if(WIN32)
     target_link_libraries(desktop_streamer
         ws2_32
-        secur32
-        bcrypt
-        mfplat
-        mfuuid
-        strmiids
+        d3d11
+        dxgi
         ole32
         oleaut32
         uuid
+        user32
+        advapi32
+        runtimeobject
     )
 endif()
 
-# Копирование DLL файлов
-if(EXISTS "${FFMPEG_ROOT}/bin")
-    file(GLOB FFMPEG_DLLS "${FFMPEG_ROOT}/bin/*.dll")
-    foreach(dll ${FFMPEG_DLLS})
-        add_custom_command(TARGET desktop_streamer POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${dll} $<TARGET_FILE_DIR:desktop_streamer>)
-    endforeach()
-endif()
-
-# Настройки компилятора
 if(MSVC)
     target_compile_definitions(desktop_streamer PRIVATE
         _CRT_SECURE_NO_WARNINGS
         WIN32_LEAN_AND_MEAN
+        NOMINMAX
     )
-    # Отключаем предупреждения для внешних заголовков
     target_compile_options(desktop_streamer PRIVATE /W3)
 else()
-    target_compile_options(desktop_streamer PRIVATE -Wall -Wextra)
+    target_compile_options(desktop_streamer PRIVATE -Wall)
 endif()

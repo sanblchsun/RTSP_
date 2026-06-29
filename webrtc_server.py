@@ -1,25 +1,29 @@
+"""
+VPS WebRTC Relay Server
+Receives H.264 NALs over TCP and relays via WebRTC to browsers.
+
+Agent network protocol:
+  [4-byte NAL size (big-endian)][NAL data (annex-B)]...
+"""
 import asyncio
 import logging
 import os
-import threading
+import struct
 import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 import uvicorn
+import av
 
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from aiortc.contrib.media import MediaRelay
-import av
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-STREAM_URL = os.environ.get(
-    "STREAM_URL",
-    "tcp://0.0.0.0:8554?listen=1&reuse=1",
-)
+RELAY_PORT = int(os.environ.get("RELAY_PORT", "8554"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8000"))
 
 relay = MediaRelay()
@@ -30,7 +34,7 @@ HTML_PAGE = """\
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Desktop Streamer</title>
+    <title>Desktop Stream</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: sans-serif; }
@@ -84,7 +88,6 @@ HTML_PAGE = """\
             var answer = await resp.json();
             await pc.setRemoteDescription(new RTCSessionDescription(answer));
         }
-
         start();
     </script>
 </body>
@@ -92,7 +95,7 @@ HTML_PAGE = """\
 """
 
 
-class StreamTrack(VideoStreamTrack):
+class H264StreamTrack(VideoStreamTrack):
     kind = "video"
 
     def __init__(self, loop):
@@ -100,47 +103,35 @@ class StreamTrack(VideoStreamTrack):
         self._loop = loop
         self._queue = asyncio.Queue(maxsize=60)
         self._running = True
-        self._thread = threading.Thread(target=self._reader, daemon=True)
+        self._reader_thread = None
+        # H.264 decoder
+        self._codec = av.CodecContext.create('h264', 'r')
+        self._codec.extradata = None
+        self._codec.thread_count = 0  # single-thread for low latency
 
-    def start(self):
-        self._thread.start()
+    def start(self, reader):
+        self._reader_thread = reader
+        self._reader_thread.start()
 
     def stop(self):
         self._running = False
 
-    def _reader(self):
-        url = STREAM_URL
-        while self._running:
-            container = None
-            try:
-                logger.info("Opening stream: %s", url)
-                container = av.open(url)
-                logger.info("Stream opened")
-
-                for packet in container.demux(video=0):
-                    for frame in packet.decode():
-                        if not self._running:
-                            return
-                        if frame.pts is None:
-                            continue
-
-                        out = frame.reformat()
-                        out.pts = frame.pts
-                        out.time_base = frame.time_base
-
-                        self._loop.call_soon_threadsafe(self._put, out)
-
-                logger.info("Stream ended, reconnecting...")
-            except Exception as e:
-                if self._running:
-                    logger.error("Stream error: %s", e)
-                    time.sleep(1)
-            finally:
-                if container:
-                    try:
-                        container.close()
-                    except:
-                        pass
+    def feed_nal(self, nal_data: bytes):
+        """Feed H.264 NAL unit (annex-B with start code) to decoder."""
+        if not self._running:
+            return
+        try:
+            packets = self._codec.parse(nal_data)
+            for packet in packets:
+                for frame in self._codec.decode(packet):
+                    if frame.pts is None:
+                        frame.pts = 0
+                    out = frame.reformat(width=frame.width, height=frame.height)
+                    out.pts = frame.pts
+                    out.time_base = frame.time_base
+                    self._loop.call_soon_threadsafe(self._put, out)
+        except av.AVError as e:
+            logger.warning("Decode error: %s", e)
 
     def _put(self, frame):
         try:
@@ -152,19 +143,93 @@ class StreamTrack(VideoStreamTrack):
         return await self._queue.get()
 
 
+class TcpRelayReader:
+    """Reads H.264 NALs from TCP and feeds to track."""
+
+    def __init__(self, track: H264StreamTrack):
+        self._track = track
+        self._running = False
+
+    def stop(self):
+        self._running = False
+
+    def run(self):
+        self._running = True
+        server = None
+        while self._running:
+            try:
+                server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind(('0.0.0.0', RELAY_PORT))
+                server.listen(1)
+                server.settimeout(5.0)
+                logger.info("Relay listening on port %d", RELAY_PORT)
+
+                while self._running:
+                    try:
+                        conn, addr = server.accept()
+                    except socket.timeout:
+                        continue
+                    logger.info("Agent connected: %s", addr[0])
+                    conn.settimeout(None)
+
+                    # Disable Nagle
+                    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+                    buf = b""
+                    while self._running:
+                        try:
+                            data = conn.recv(65536)
+                        except Exception:
+                            break
+                        if not data:
+                            break
+
+                        buf += data
+                        # Parse: [4-byte BE size][NAL data]
+                        while len(buf) >= 4:
+                            size = struct.unpack('>I', buf[:4])[0]
+                            if size == 0:
+                                buf = buf[4:]
+                                continue
+                            if len(buf) < 4 + size:
+                                break
+                            nal = buf[4:4 + size]
+                            buf = buf[4 + size:]
+                            self._track.feed_nal(nal)
+
+                    logger.info("Agent disconnected")
+                    conn.close()
+
+            except Exception as e:
+                if self._running:
+                    logger.error("Relay error: %s", e)
+                    time.sleep(1)
+            finally:
+                if server:
+                    try:
+                        server.close()
+                    except Exception:
+                        pass
+
+
+import socket  # noqa: E402 (needed for the relay reader)
+
+
 @asynccontextmanager
 async def lifespan(app):
     global source_track
     loop = asyncio.get_running_loop()
-    source_track = StreamTrack(loop)
-    source_track.start()
-    logger.info("Server ready, stream URL: %s", STREAM_URL)
+    source_track = H264StreamTrack(loop)
+    reader = TcpRelayReader(source_track)
+    source_track.start(reader)
+    logger.info("VPS relay ready on port %d", RELAY_PORT)
     yield
-    if source_track:
-        source_track.stop()
+    source_track.stop()
+    reader.stop()
 
 
-app = FastAPI(title="Desktop Streamer — WebRTC", lifespan=lifespan)
+app = FastAPI(title="VPS Desktop Stream — WebRTC", lifespan=lifespan)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -198,9 +263,7 @@ async def offer(request: Request):
 
 @app.get("/health")
 async def health():
-    if source_track and not source_track._queue.empty():
-        return {"status": "streaming"}
-    return {"status": "waiting"}
+    return {"status": "online"}
 
 
 if __name__ == "__main__":
