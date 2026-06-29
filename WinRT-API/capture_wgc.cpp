@@ -337,3 +337,14 @@ void WGCCapture::Shutdown()
 
     m_initialized = false;
 }
+
+#include <cstdio>
+#include <cstdarg>
+void logf(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    std::vfprintf(stderr, fmt, args);
+    va_end(args);
+    std::fprintf(stderr, "\n");
+}

@@ -22,8 +22,6 @@
 #include <winrt/Windows.Graphics.h>
 #include <winrt/Windows.Foundation.h>
 
-#include "capture_base.h"
-
 
 struct WGCOutput
 {
@@ -35,20 +33,20 @@ struct WGCOutput
     ID3D11Texture2D *staging = nullptr;
 };
 
-class WGCCapture : public CaptureBase
+class WGCCapture
 {
 public:
     WGCCapture();
-    ~WGCCapture() override;
+    ~WGCCapture();
 
-    bool Initialize(int fps = 15) override;
+    bool Initialize(int fps = 15);
     bool CaptureFrame(int monitor_id,
-        std::vector<uint8_t> &out_bgra, int &out_w, int &out_h) override;
-    void Shutdown() override;
+        std::vector<uint8_t> &out_bgra, int &out_w, int &out_h);
+    void Shutdown();
 
-    int GetMonitorCount() const override { return (int)m_outputs.size(); }
+    int GetMonitorCount() const { return (int)m_outputs.size(); }
     bool GetMonitorInfo(int monitor_id,
-        int &out_w, int &out_h, int &out_x, int &out_y) const override;
+        int &out_w, int &out_h, int &out_x, int &out_y) const;
     static bool IsWGCSupported();
 
 private:

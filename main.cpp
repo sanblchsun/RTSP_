@@ -1,4 +1,3 @@
-#include "desktop_streamer.h"
 #include "WinRT-API/capture_wgc.h"
 #include "WinRT-API/encoder_x264.h"
 #include "rtp/h264_rtp_packetizer.h"

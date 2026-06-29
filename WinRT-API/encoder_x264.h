@@ -1,25 +1,23 @@
 #pragma once
-#include "encoder.h"
 #include <vector>
 #include <cstdint>
 #include <x264.h>
 
-class X264Encoder : public IEncoder
+class X264Encoder
 {
 public:
     X264Encoder();
-    ~X264Encoder() override;
+    ~X264Encoder();
 
-    bool Initialize(int width, int height, int fps, int qp) override;
+    bool Initialize(int width, int height, int fps, int qp);
     bool EncodeFrame(const std::vector<uint8_t> &bgra,
-                     std::vector<uint8_t> &out_nal) override;
-    void Flush(std::vector<uint8_t> &out_nal) override;
-    void Shutdown() override;
+                     std::vector<uint8_t> &out_nal);
+    void Flush(std::vector<uint8_t> &out_nal);
+    void Shutdown();
 
-    int GetWidth() const override { return m_width; }
-    int GetHeight() const override { return m_height; }
-    bool IsInitialized() const override { return m_encoder != nullptr; }
-    std::string GetName() const override { return "libx264"; }
+    int GetWidth() const { return m_width; }
+    int GetHeight() const { return m_height; }
+    bool IsInitialized() const { return m_encoder != nullptr; }
 
     const std::vector<uint8_t> &GetSps() const { return m_sps; }
     const std::vector<uint8_t> &GetPps() const { return m_pps; }

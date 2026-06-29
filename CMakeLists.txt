@@ -38,17 +38,13 @@ endif()
 
 set(SOURCES
     main.cpp
-    desktop_streamer.cpp
     WinRT-API/capture_wgc.cpp
     WinRT-API/encoder_x264.cpp
     rtp/h264_rtp_packetizer.cpp
     rtsp/rtsp_server.cpp
 )
 set(HEADERS
-    desktop_streamer.h
-    WinRT-API/capture_base.h
     WinRT-API/capture_wgc.h
-    WinRT-API/encoder.h
     WinRT-API/encoder_x264.h
     rtp/rtp_header.h
     rtp/h264_rtp_packetizer.h
