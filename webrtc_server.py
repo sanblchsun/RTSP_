@@ -208,10 +208,10 @@ class AgentSession:
     def __init__(self, conn, addr):
         self._conn = conn
         self._addr = addr
-        self._cseq = 1
         self._buf = b""
         self._running = True
         self._parser = RtpParser()
+        self._play_sent = False
 
     def close(self):
         self._running = False
@@ -222,40 +222,8 @@ class AgentSession:
 
     def handle(self):
         logger.info("Agent connected: %s", self._addr[0])
-        self._send("RTSP/1.0 200 OK\r\nCSeq: 1\r\nServer: desktop-relay\r\n\r\n")
-        self._send(
-            "RTSP/1.0 200 OK\r\nCSeq: 1\r\n"
-            "Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n\r\n"
-        )
+        session_id = "12345678"
 
-        sdp = (
-            "v=0\r\no=- 0 1 IN IP4 0.0.0.0\r\ns=Desktop Stream\r\n"
-            "c=IN IP4 0.0.0.0\r\nt=0 0\r\n"
-            "m=video 0 RTP/AVP 96\r\n"
-            "a=rtpmap:96 H264/90000\r\n"
-            "a=fmtp:96 packetization-mode=1;profile-level-id=42C01F\r\n"
-            "a=control:trackID=0\r\n\r\n"
-        )
-        self._send(
-            f"RTSP/1.0 200 OK\r\nCSeq: 1\r\n"
-            f"Content-Type: application/sdp\r\n"
-            f"Content-Length: {len(sdp)}\r\n\r\n{sdp}"
-        )
-        self._send(
-            f"RTSP/1.0 200 OK\r\nCSeq: 1\r\n"
-            f"Transport: RTP/AVP/TCP;interleaved=0-1\r\n"
-            f"Session: 12345678\r\n\r\n"
-        )
-        self._send(
-            f"RTSP/1.0 200 OK\r\nCSeq: 1\r\n"
-            f"Session: 12345678\r\nRTP-Info: url=trackID=0\r\n\r\n"
-        )
-
-        logger.info("RTSP handshake complete, receiving RTP stream")
-        self._receive_rtp()
-        logger.info("Agent disconnected: %s", self._addr[0])
-
-    def _receive_rtp(self):
         while self._running:
             try:
                 data = self._conn.recv(65536)
@@ -266,20 +234,82 @@ class AgentSession:
 
             self._buf += data
 
-            while True:
-                if len(self._buf) < 4:
-                    break
-                if self._buf[0] != 0x24:
-                    logger.warning("Bad interleaved marker: 0x%02X", self._buf[0])
-                    self._buf = self._buf[1:]
+            while self._buf:
+                # Try interleaved RTP ($ + channel + 2B length)
+                if self._buf[0] == 0x24 and len(self._buf) >= 4:
+                    pkt_len = struct.unpack('>H', self._buf[2:4])[0]
+                    if len(self._buf) < 4 + pkt_len:
+                        break
+                    rtp = self._buf[4:4 + pkt_len]
+                    self._buf = self._buf[4 + pkt_len:]
+                    if self._play_sent:
+                        self._parser.feed_rtp(rtp)
                     continue
-                channel = self._buf[1]
-                pkt_len = struct.unpack('>H', self._buf[2:4])[0]
-                if len(self._buf) < 4 + pkt_len:
+
+                # Try RTSP request (terminated by \r\n\r\n)
+                if b'\r\n\r\n' in self._buf:
+                    raw, self._buf = self._buf.split(b'\r\n\r\n', 1)
+                    request = raw.decode('utf-8', errors='replace')
+                    lines = request.split('\r\n')
+                    if not lines:
+                        continue
+                    parts = lines[0].split(' ')
+                    if len(parts) < 2:
+                        continue
+                    method = parts[0]
+
+                    cseq = 1
+                    for line in lines[1:]:
+                        if line.lower().startswith('cseq:'):
+                            cseq = int(line.split(':')[1].strip())
+                            break
+
+                    if method == 'OPTIONS':
+                        self._send(
+                            f"RTSP/1.0 200 OK\r\n"
+                            f"CSeq: {cseq}\r\n"
+                            f"Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN\r\n\r\n"
+                        )
+                    elif method == 'DESCRIBE':
+                        sdp = (
+                            "v=0\r\no=- 0 1 IN IP4 0.0.0.0\r\ns=Desktop Stream\r\n"
+                            "c=IN IP4 0.0.0.0\r\nt=0 0\r\n"
+                            "m=video 0 RTP/AVP 96\r\n"
+                            "a=rtpmap:96 H264/90000\r\n"
+                            "a=fmtp:96 packetization-mode=1;profile-level-id=42C01F\r\n"
+                            "a=control:trackID=0\r\n"
+                        )
+                        self._send(
+                            f"RTSP/1.0 200 OK\r\n"
+                            f"CSeq: {cseq}\r\n"
+                            f"Content-Type: application/sdp\r\n"
+                            f"Content-Length: {len(sdp)}\r\n\r\n{sdp}"
+                        )
+                    elif method == 'SETUP':
+                        self._send(
+                            f"RTSP/1.0 200 OK\r\n"
+                            f"CSeq: {cseq}\r\n"
+                            f"Transport: RTP/AVP/TCP;interleaved=0-1\r\n"
+                            f"Session: {session_id}\r\n\r\n"
+                        )
+                    elif method == 'PLAY':
+                        self._play_sent = True
+                        self._send(
+                            f"RTSP/1.0 200 OK\r\n"
+                            f"CSeq: {cseq}\r\n"
+                            f"Session: {session_id}\r\n"
+                            f"RTP-Info: url=trackID=0\r\n\r\n"
+                        )
+                        logger.info("RTSP handshake complete, receiving RTP stream")
+                    elif method == 'TEARDOWN':
+                        self._send(f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\n\r\n")
+                        return
+                    else:
+                        self._send(f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\n\r\n")
+                else:
                     break
-                rtp = self._buf[4:4 + pkt_len]
-                self._buf = self._buf[4 + pkt_len:]
-                self._parser.feed_rtp(rtp)
+
+        logger.info("Agent disconnected: %s", self._addr[0])
 
     def _send(self, response: str):
         try:
