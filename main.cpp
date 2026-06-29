@@ -34,6 +34,9 @@
 #endif
 
 static std::atomic<bool> g_running{true};
+static std::string vps_host;
+static int vps_port = 8554;
+static bool use_udp = false;
 
 void signal_handler(int)
 {
@@ -41,22 +44,37 @@ void signal_handler(int)
     g_running.store(false);
 }
 
+// ---- init winsock (safe to call multiple times) ----
+#ifdef _WIN32
+static bool ensure_winsock()
+{
+    static bool ok = false;
+    if (!ok) { WSADATA w; ok = WSAStartup(MAKEWORD(2,2), &w) == 0; }
+    return ok;
+}
+#else
+static bool ensure_winsock() { return true; }
+#endif
+
+// ---- Interface for push transport ----
+struct IPushSender
+{
+    virtual bool Connect(const std::string &host, int port) = 0;
+    virtual void Disconnect() = 0;
+    virtual bool SendNal(const uint8_t *data, size_t size) = 0;
+    virtual ~IPushSender() = default;
+};
+
 // ---- H.264 NAL over TCP sender ----
-class TcpPushSender
+class TcpPushSender : public IPushSender
 {
 public:
-    TcpPushSender() = default;
-    ~TcpPushSender() { Disconnect(); }
+    ~TcpPushSender() override { Disconnect(); }
 
-    bool Connect(const std::string &host, int port)
+    bool Connect(const std::string &host, int port) override
     {
         Disconnect();
-
-        // init winsock (safe to call multiple times in Win)
-#ifdef _WIN32
-        static bool wsock = false;
-        if (!wsock) { WSADATA w; WSAStartup(MAKEWORD(2,2), &w); wsock = true; }
-#endif
+        ensure_winsock();
 
         sock_ = socket(AF_INET, SOCK_STREAM, 0);
         if (sock_ == INVALID_SOCKET) return false;
@@ -78,7 +96,7 @@ public:
         return true;
     }
 
-    void Disconnect()
+    void Disconnect() override
     {
         if (sock_ != INVALID_SOCKET)
         {
@@ -87,10 +105,9 @@ public:
         }
     }
 
-    bool SendNal(const uint8_t *data, size_t size)
+    bool SendNal(const uint8_t *data, size_t size) override
     {
         if (sock_ == INVALID_SOCKET) return false;
-        // [4-byte big-endian size][NAL data]
         uint32_t net_size = htonl((uint32_t)size);
         int r = (int)send(sock_, (const char*)&net_size, 4, 0);
         if (r <= 0) return false;
@@ -100,6 +117,76 @@ public:
 
 private:
     SOCKET sock_ = INVALID_SOCKET;
+};
+
+// ---- H.264 NAL over UDP sender (fragmented) ----
+class UdpPushSender : public IPushSender
+{
+public:
+    ~UdpPushSender() override { Disconnect(); }
+
+    bool Connect(const std::string &host, int port) override
+    {
+        Disconnect();
+        ensure_winsock();
+
+        sock_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock_ == INVALID_SOCKET) return false;
+
+        dest_addr_.sin_family = AF_INET;
+        dest_addr_.sin_port = htons((uint16_t)port);
+        inet_pton(AF_INET, host.c_str(), &dest_addr_.sin_addr);
+        return true;
+    }
+
+    void Disconnect() override
+    {
+        if (sock_ != INVALID_SOCKET)
+        {
+            closesocket(sock_);
+            sock_ = INVALID_SOCKET;
+        }
+    }
+
+    bool SendNal(const uint8_t *data, size_t size) override
+    {
+        if (sock_ == INVALID_SOCKET) return false;
+
+        const int frag_payload = MAX_PAYLOAD - HEADER_SIZE;
+        uint16_t total_frags = (uint16_t)((size + frag_payload - 1) / frag_payload);
+        if (total_frags == 0) total_frags = 1;
+
+        uint8_t buf[MAX_PAYLOAD];
+
+        for (uint16_t i = 0; i < total_frags; i++)
+        {
+            size_t off = i * frag_payload;
+            size_t chunk = (std::min)(size - off, (size_t)frag_payload);
+
+            // Header: seq, index, total
+            uint32_t nbo_seq = htonl(seq_);
+            uint16_t nbo_idx = htons(i);
+            uint16_t nbo_tot = htons(total_frags);
+            memcpy(buf, &nbo_seq, 4);
+            memcpy(buf + 4, &nbo_idx, 2);
+            memcpy(buf + 6, &nbo_tot, 2);
+            memcpy(buf + HEADER_SIZE, data + off, chunk);
+
+            int r = (int)sendto(sock_, (const char*)buf, HEADER_SIZE + (int)chunk, 0,
+                                (sockaddr*)&dest_addr_, sizeof(dest_addr_));
+            if (r < 0)
+                return false;
+        }
+        seq_++;
+        return true;
+    }
+
+private:
+    SOCKET sock_ = INVALID_SOCKET;
+    sockaddr_in dest_addr_{};
+    uint32_t seq_ = 0;
+    static const int MAX_PAYLOAD = 1400;
+    static const int HEADER_SIZE = 8; // seq(4) + frag_index(2) + total_frags(2)
 };
 
 // Extract SPS/PPS from encoded NAL data
@@ -151,8 +238,9 @@ static bool extract_sps_pps(const std::vector<uint8_t> &nal_data,
 static void print_usage(const char *prog)
 {
     std::cout << "Usage:\n"
-              << "  " << prog << "                  # RTSP server mode (local)\n"
-              << "  " << prog << " push <vps_ip>    # Push to VPS (H.264 over TCP)\n";
+              << "  " << prog << "                         # RTSP server mode (local)\n"
+              << "  " << prog << " push <vps_ip> [port]    # Push to VPS (TCP, default port 8554)\n"
+              << "  " << prog << " push <vps_ip> [port] udp # Push to VPS (UDP)\n";
 }
 
 int main(int argc, char *argv[])
@@ -161,8 +249,6 @@ int main(int argc, char *argv[])
     signal(SIGTERM, signal_handler);
 
     bool push_mode = false;
-    std::string vps_host;
-    int vps_port = 8554;
 
     if (argc > 1)
     {
@@ -171,7 +257,20 @@ int main(int argc, char *argv[])
         {
             push_mode = true;
             vps_host = argv[2];
-            if (argc > 3) vps_port = std::atoi(argv[3]);
+            if (argc > 3)
+            {
+                std::string arg3 = argv[3];
+                if (arg3 == "udp")
+                {
+                    use_udp = true;
+                }
+                else
+                {
+                    vps_port = std::atoi(argv[3]);
+                    if (argc > 4 && std::string(argv[4]) == "udp")
+                        use_udp = true;
+                }
+            }
         }
         else
         {
@@ -230,19 +329,31 @@ int main(int argc, char *argv[])
     packetizer.SetSsrc(0xDEADBEEF);
 
     RtspServer rtsp;
-    TcpPushSender pusher;
-    bool rtsp_ready = false;
     bool push_ready = false;
+    bool rtsp_ready = false;
+    std::unique_ptr<IPushSender> pusher;
 
     if (push_mode)
     {
-        std::cout << "Connecting to VPS " << vps_host << ":" << vps_port << std::endl;
-        push_ready = pusher.Connect(vps_host, vps_port);
-        if (!push_ready)
-            std::cerr << "VPS connection failed, will retry" << std::endl;
+        if (use_udp)
+        {
+            pusher = std::make_unique<UdpPushSender>();
+            std::cout << "Push mode: UDP to " << vps_host << ":" << vps_port << std::endl;
+        }
+        else
+        {
+            pusher = std::make_unique<TcpPushSender>();
+            std::cout << "Push mode: TCP to " << vps_host << ":" << vps_port << std::endl;
+        }
+
+        if (!pusher->Connect(vps_host, vps_port))
+            std::cerr << "Push connect failed (will retry)" << std::endl;
+        else
+            push_ready = true;
     }
     else
     {
+        std::cout << "RTSP server mode" << std::endl;
         rtsp.SetLogCallback([](const std::string &msg) {
             std::cout << "[rtsp] " << msg << std::endl;
         });
@@ -280,16 +391,14 @@ int main(int argc, char *argv[])
 
         if (push_mode)
         {
-            // Send raw H.264 NALs to VPS
-            if (!pusher.SendNal(nals.data(), nals.size()))
+            if (!pusher->SendNal(nals.data(), nals.size()))
             {
-                // Reconnect
                 std::cout << "VPS disconnected, reconnecting..." << std::endl;
-                pusher.Disconnect();
+                pusher->Disconnect();
                 std::this_thread::sleep_for(std::chrono::seconds(1));
-                push_ready = pusher.Connect(vps_host, vps_port);
+                push_ready = pusher->Connect(vps_host, vps_port);
                 if (push_ready)
-                    pusher.SendNal(nals.data(), nals.size());
+                    pusher->SendNal(nals.data(), nals.size());
             }
         }
         else
@@ -314,7 +423,7 @@ int main(int argc, char *argv[])
     }
 
     rtsp.Stop();
-    pusher.Disconnect();
+    if (pusher) pusher->Disconnect();
     encoder->Shutdown();
     capture->Shutdown();
     std::cout << "\nDone. " << frame_count << " frames" << std::endl;

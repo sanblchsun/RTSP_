@@ -154,6 +154,74 @@ class H264StreamTrack(VideoStreamTrack):
         return await self._queue.get()
 
 
+class UdpRelayReader:
+    """Receives fragmented H.264 NALs from UDP and feeds to track."""
+
+    HEADER_SIZE = 8  # seq(4) + frag_index(2) + total_frags(2)
+
+    def __init__(self, track: H264StreamTrack):
+        self._track = track
+        self._running = False
+        self._frags = {}  # seq -> { total, chunks: [bytes], count }
+
+    def stop(self):
+        self._running = False
+
+    def run(self):
+        self._running = True
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('0.0.0.0', RELAY_PORT))
+        sock.settimeout(1.0)
+        logger.info("UDP relay listening on port %d", RELAY_PORT)
+
+        while self._running:
+            try:
+                data, addr = sock.recvfrom(65536)
+            except socket.timeout:
+                self._cleanup_stale(5.0)
+                continue
+            except Exception:
+                break
+
+            if len(data) < self.HEADER_SIZE:
+                continue
+
+            seq = struct.unpack('>I', data[:4])[0]
+            frag_idx = struct.unpack('>H', data[4:6])[0]
+            frag_total = struct.unpack('>H', data[6:8])[0]
+            payload = data[self.HEADER_SIZE:]
+
+            if frag_total == 0:
+                continue
+
+            if seq not in self._frags:
+                self._frags[seq] = {
+                    'total': frag_total,
+                    'chunks': [None] * frag_total,
+                    'count': 0,
+                    'time': time.monotonic(),
+                }
+
+            entry = self._frags[seq]
+            if frag_idx < frag_total and entry['chunks'][frag_idx] is None:
+                entry['chunks'][frag_idx] = payload
+                entry['count'] += 1
+
+            if entry['count'] == frag_total:
+                nal = b''.join(entry['chunks'])
+                del self._frags[seq]
+                self._track.feed_nal(nal)
+
+        sock.close()
+
+    def _cleanup_stale(self, timeout: float):
+        now = time.monotonic()
+        stale = [s for s, e in self._frags.items() if now - e['time'] > timeout]
+        for s in stale:
+            del self._frags[s]
+
+
 class TcpRelayReader:
     """Reads H.264 NALs from TCP and feeds to track."""
 
@@ -174,7 +242,7 @@ class TcpRelayReader:
                 server.bind(('0.0.0.0', RELAY_PORT))
                 server.listen(1)
                 server.settimeout(5.0)
-                logger.info("Relay listening on port %d", RELAY_PORT)
+                logger.info("TCP relay listening on port %d", RELAY_PORT)
 
                 while self._running:
                     try:
@@ -184,7 +252,6 @@ class TcpRelayReader:
                     logger.info("Agent connected: %s", addr[0])
                     conn.settimeout(None)
 
-                    # Disable Nagle
                     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
                     buf = b""
@@ -197,7 +264,6 @@ class TcpRelayReader:
                             break
 
                         buf += data
-                        # Parse: [4-byte BE size][NAL data]
                         while len(buf) >= 4:
                             size = struct.unpack('>I', buf[:4])[0]
                             if size == 0:
@@ -214,7 +280,7 @@ class TcpRelayReader:
 
             except Exception as e:
                 if self._running:
-                    logger.error("Relay error: %s", e)
+                    logger.error("TCP relay error: %s", e)
                     time.sleep(1)
             finally:
                 if server:
@@ -229,12 +295,17 @@ async def lifespan(app):
     global source_track
     loop = asyncio.get_running_loop()
     source_track = H264StreamTrack(loop)
-    reader = TcpRelayReader(source_track)
-    source_track.start(reader)
-    logger.info("VPS relay ready on port %d", RELAY_PORT)
+    tcp_reader = TcpRelayReader(source_track)
+    udp_reader = UdpRelayReader(source_track)
+    # Start both readers in separate threads
+    source_track.start(tcp_reader)
+    t = threading.Thread(target=udp_reader.run, daemon=True)
+    t.start()
+    logger.info("VPS relay ready on port %d (TCP+UDP)", RELAY_PORT)
     yield
     source_track.stop()
-    reader.stop()
+    tcp_reader.stop()
+    udp_reader.stop()
 
 
 app = FastAPI(title="VPS Desktop Stream — WebRTC", lifespan=lifespan)
