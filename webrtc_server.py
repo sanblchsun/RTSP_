@@ -13,7 +13,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 import av
 
@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 RTSP_PORT = int(os.environ.get("RTSP_PORT", "8554"))
-HTTP_PORT = int(os.environ.get("HTTP_PORT", "8000"))
+HTTP_PORT = int(os.environ.get("HTTP_PORT", "8001"))
 
 relay = MediaRelay()
 source_track = None
@@ -104,8 +104,8 @@ class H264StreamTrack(VideoStreamTrack):
         self._queue = asyncio.Queue(maxsize=60)
         self._running = True
         self._frame_count = 0
+        self._decode_lock = threading.Lock()
         self._codec = av.CodecContext.create('h264', 'r')
-        self._codec.extradata = None
         self._codec.thread_count = 0
 
     def stop(self):
@@ -114,17 +114,18 @@ class H264StreamTrack(VideoStreamTrack):
     def feed_nal(self, nal_data: bytes):
         if not self._running:
             return
-        try:
-            for packet in self._codec.parse(nal_data):
-                for frame in self._codec.decode(packet):
-                    if frame.width is None or frame.height is None:
-                        continue
-                    frame.pts = self._frame_count
-                    frame.time_base = fractions.Fraction(1, 30)
-                    self._frame_count += 1
-                    self._loop.call_soon_threadsafe(self._put, frame)
-        except Exception as e:
-            logger.warning("Decode error: %s", e)
+        with self._decode_lock:
+            try:
+                for packet in self._codec.parse(nal_data):
+                    for frame in self._codec.decode(packet):
+                        if frame.width is None or frame.height is None:
+                            continue
+                        frame.pts = self._frame_count
+                        frame.time_base = fractions.Fraction(1, 30)
+                        self._frame_count += 1
+                        self._loop.call_soon_threadsafe(self._put, frame)
+            except Exception as e:
+                logger.warning("Decode error: %s", e)
 
     def _put(self, frame):
         try:
@@ -147,6 +148,9 @@ class RtpParser:
         self._fua_buf = None
 
     def feed_rtp(self, data: bytes):
+        global source_track
+        if source_track is None:
+            return
         if len(data) < RTP_HEADER_SIZE:
             return
         if (data[0] >> 6) != 2:
@@ -167,8 +171,8 @@ class RtpParser:
                 self._handle_stapa(payload)
             elif nal_type <= 23:
                 source_track.feed_nal(START_CODE + payload)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("RTP parse error: %s", e)
 
     def _handle_fua(self, payload: bytes):
         header = payload[1]
@@ -186,8 +190,11 @@ class RtpParser:
         elif self._fua_buf is not None:
             self._fua_buf.extend(fragment)
             if end:
-                source_track.feed_nal(bytes(self._fua_buf))
+                if source_track is not None:
+                    source_track.feed_nal(bytes(self._fua_buf))
                 self._fua_buf = None
+        elif end:
+            self._fua_buf = None
 
     def _handle_stapa(self, payload: bytes):
         offset = 1
@@ -196,7 +203,8 @@ class RtpParser:
             offset += 2
             if offset + nalu_size > len(payload):
                 break
-            source_track.feed_nal(START_CODE + payload[offset:offset+nalu_size])
+            if source_track is not None:
+                source_track.feed_nal(START_CODE + payload[offset:offset+nalu_size])
             offset += nalu_size
 
 
@@ -392,7 +400,7 @@ async def offer(request: Request):
     if source_track:
         pc.addTrack(relay.subscribe(source_track))
     else:
-        return {"error": "No source track available"}, 503
+        return JSONResponse(status_code=503, content={"error": "No source track available"})
 
     @pc.on("connectionstatechange")
     async def on_connection_state():

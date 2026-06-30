@@ -1,0 +1,7 @@
+services:
+  webrtc-relay:
+    build: .
+    image: webrtc-relay
+    container_name: webrtc-relay
+    network_mode: host
+    restart: unless-stopped
