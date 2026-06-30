@@ -220,3 +220,17 @@ desktop_streamer.exe
 - `fastapi` + `uvicorn[standard]` — HTTP
 - `aiortc` — WebRTC
 - `av` (PyAV) — H.264 декодинг
+
+
+
+
+### что бы снаружи был виден докер контейнер
+
+sudo iptables -t nat -A PREROUTING -i eth0 -p udp --dport 32768:60999 -j DNAT --to-destination 172.19.0.5
+sudo iptables -A FORWARD -d 172.19.0.5 -p udp --dport 32768:60999 -j ACCEPT
+sudo iptables -A FORWARD -s 172.19.0.5 -p udp --sport 32768:60999 -j ACCEPT
+
+
+172.19.0.5  это IP контейнера
+
+eth0  интерфейс в интернет
