@@ -12,6 +12,7 @@ public:
     bool Initialize(int width, int height, int fps, int qp);
     bool EncodeFrame(const std::vector<uint8_t> &bgra,
                      std::vector<uint8_t> &out_nal);
+    void RequestKeyframe();
     void Flush(std::vector<uint8_t> &out_nal);
     void Shutdown();
 

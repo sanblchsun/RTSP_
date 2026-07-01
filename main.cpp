@@ -29,6 +29,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <sys/select.h>
 #define SOCKET int
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
@@ -129,15 +130,48 @@ public:
         header[1] = 0;                     // channel 0
         header[2] = (uint8_t)((size >> 8) & 0xFF);
         header[3] = (uint8_t)(size & 0xFF);
-        int r = (int)send(sock_, (const char*)header, 4, 0);
-        if (r <= 0) return false;
-        r = (int)send(sock_, (const char*)data, (int)size, 0);
-        return r > 0;
+        if (!send_all(header, 4)) return false;
+        return send_all(data, size);
+    }
+
+    bool send_all(const uint8_t *buf, size_t len)
+    {
+        while (len > 0) {
+            int r = (int)send(sock_, (const char*)buf, (int)len, 0);
+            if (r <= 0) return false;
+            buf += r;
+            len -= (size_t)r;
+        }
+        return true;
+    }
+
+    bool KeyframeRequested() const { return keyframe_requested_; }
+    void ClearKeyframeFlag() { keyframe_requested_ = false; }
+
+    void CheckForIncoming()
+    {
+        if (sock_ == INVALID_SOCKET) return;
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(sock_, &read_fds);
+        struct timeval tv = {0, 0};
+        if (select((int)sock_ + 1, &read_fds, nullptr, nullptr, &tv) > 0)
+        {
+            char buf[64];
+            int n = (int)recv(sock_, buf, sizeof(buf) - 1, 0);
+            if (n > 0)
+            {
+                buf[n] = 0;
+                if (strstr(buf, "!K"))
+                    keyframe_requested_ = true;
+            }
+        }
     }
 
 private:
     SOCKET sock_ = INVALID_SOCKET;
     bool handshake_done_ = false;
+    bool keyframe_requested_ = false;
     char recv_buf_[4096];
 
     void send_req(const std::string &req)
@@ -359,6 +393,14 @@ int main(int argc, char *argv[])
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     continue;
                 }
+            }
+
+            // Check for incoming keyframe requests from server
+            rtsp_client.CheckForIncoming();
+            if (rtsp_client.KeyframeRequested())
+            {
+                encoder->RequestKeyframe();
+                rtsp_client.ClearKeyframeFlag();
             }
 
             for (const auto &pkt : rtp_packets)

@@ -65,9 +65,8 @@ bool X264Encoder::Initialize(int width, int height, int fps, int qp)
     m_params.i_log_level = X264_LOG_WARNING;
     m_params.p_log_private = nullptr;
 
-    m_params.rc.i_rc_method = X264_RC_CRF;
-    m_params.rc.f_rf_constant = (float)qp;
-    m_params.rc.f_rf_constant_max = (float)(qp + 3);
+    m_params.rc.i_rc_method = X264_RC_CQP;
+    m_params.rc.i_qp_constant = qp;
 
     // NAL HRD conformance + AUD
     m_params.b_repeat_headers = 1;
@@ -232,6 +231,12 @@ bool X264Encoder::EncodeFrame(const std::vector<uint8_t> &bgra,
 
     m_frame_count++;
     return true;
+}
+
+void X264Encoder::RequestKeyframe()
+{
+    if (!m_encoder) return;
+    x264_encoder_intra_refresh(m_encoder);
 }
 
 void X264Encoder::Flush(std::vector<uint8_t> &out_nal)

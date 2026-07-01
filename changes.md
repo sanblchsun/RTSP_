@@ -60,3 +60,36 @@
 6. **Очередь 60 кадров** (`webrtc_server.py:110`) — уменьшена до 5, убирает 2 секунды буферизации.
 
 7. **Нет sprop-parameter-sets в WebRTC SDP** (`webrtc_server.py:434-444`) — добавлен.
+
+---
+
+## Раунд 2: Дополнительные оптимизации задержки
+
+### (`WinRT-API/encoder_x264.cpp:68-69`): CRF → CQP
+
+**Было:** `X264_RC_CRF` с `f_rf_constant = qp` и `f_rf_constant_max = qp + 3`. CRF варьирует QP от кадра к кадру — размер пакета скачет, TCP send buffer скачет, задержка неравномерная.
+
+**Стало:** `X264_RC_CQP` с `i_qp_constant = qp`. QP фиксирован на каждом кадре. Размер пакета зависит только от сложности сцены, не от номера кадра. TCP поток гладкий → предсказуемая задержка. На статичном десктопе битрейт падает сам (меньше данных), без скачков QP.
+
+### (`main.cpp:125-146`): Фикс частичной отправки в `SendRtp()`
+
+**Было:** `send()` вызывался один раз, возврат проверялся на `<= 0`. Если `send()` отправлял меньше байт, чем запрошено (может происходить при любой сетевой нагрузке), interleaved framing ломался — все последующие пакеты уходили со сдвигом.
+
+**Стало:** Добавлен `send_all()` — цикл досылает остаток, пока все байты не отправлены или пока `send()` не вернёт ошибку. Используется для заголовка и данных.
+
+### (`main.cpp, webrtc_server.py, encoder_x264.h/cpp`): RTCP PLI/FIR → keyframe forwarding
+
+**Проблема:** При переключении вкладок в браузере или при новом подключении aiortc получает RTCP PLI/FIR и вызывает `_request_keyframe()` на `VideoStreamTrack`. Без обработки — браузер ждёт ~2 секунды, пока intra_refresh обновит всю картинку.
+
+**Исправление (`webrtc_server.py`):**
+- `H264StreamTrack` переопределяет `_request_keyframe()` — при вызове от aiortc отправляет callback в основной цикл
+- Callback регистрируется в `lifespan` и вызывает `AgentSession.request_keyframe()`
+- `AgentSession.request_keyframe()` шлёт сигнал `!K\r\n` по TCP агенту
+- Глобальные `_agent_session`/`_agent_lock` для thread-safe доступа к активной сессии
+
+**Исправление (`main.cpp`):**
+- `RtspClient.CheckForIncoming()` — неблокирующий `select()` на сокете. Если есть данные и они содержат `!K`, устанавливает флаг `keyframe_requested_`
+- В главном цикле `push_mode`: перед отправкой RTP вызывается `CheckForIncoming()`, при флаге — `encoder->RequestKeyframe()`
+
+**Исправление (`WinRT-API/encoder_x264.cpp`):**
+- `X264Encoder::RequestKeyframe()` — вызывает `x264_encoder_intra_refresh(m_encoder)` для сброса цикла intra refresh. Следующие кадры обновляют макроблоки с начала, браузер быстрее получает полную картинку.

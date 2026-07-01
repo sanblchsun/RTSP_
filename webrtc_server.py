@@ -35,6 +35,10 @@ _sps_data = None
 _pps_data = None
 _sps_pps_lock = threading.Lock()
 
+# Reference to the current active agent session (for keyframe forwarding)
+_agent_session = None
+_agent_lock = threading.Lock()
+
 HTML_PAGE = """\
 <!DOCTYPE html>
 <html>
@@ -113,6 +117,15 @@ class H264StreamTrack(VideoStreamTrack):
         self._decode_lock = threading.Lock()
         self._codec = av.CodecContext.create('h264', 'r')
         self._codec.thread_count = 0
+        self._request_keyframe_cb = None
+
+    def on_request_keyframe(self, cb):
+        self._request_keyframe_cb = cb
+
+    def _request_keyframe(self):
+        logger.info("PLI/FIR requested from browser")
+        if self._request_keyframe_cb:
+            self._loop.call_soon_threadsafe(self._request_keyframe_cb)
 
     def stop(self):
         self._running = False
@@ -231,13 +244,21 @@ class RtpParser:
 class AgentSession:
     """Handles one agent via RTSP + interleaved RTP."""
 
-    def __init__(self, conn, addr):
+    def __init__(self, conn, addr, keyframe_cb=None):
         self._conn = conn
         self._addr = addr
         self._buf = b""
         self._running = True
         self._parser = RtpParser()
         self._play_sent = False
+        self._keyframe_cb = keyframe_cb
+
+    def request_keyframe(self):
+        """Called when browser requests PLI/FIR — forward to agent."""
+        try:
+            self._conn.sendall(b"!K\r\n")
+        except Exception:
+            pass
 
     def close(self):
         self._running = False
@@ -371,7 +392,16 @@ class RtspServer:
                         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     except socket.timeout:
                         continue
-                    AgentSession(conn, addr).handle()
+                    global _agent_session
+                    session = AgentSession(conn, addr)
+                    with _agent_lock:
+                        _agent_session = session
+                    try:
+                        session.handle()
+                    finally:
+                        with _agent_lock:
+                            if _agent_session is session:
+                                _agent_session = None
 
             except Exception as e:
                 if self._running:
@@ -392,6 +422,14 @@ async def lifespan(app):
     global source_track
     loop = asyncio.get_running_loop()
     source_track = H264StreamTrack(loop)
+
+    def on_keyframe_request():
+        global _agent_session
+        with _agent_lock:
+            if _agent_session:
+                _agent_session.request_keyframe()
+
+    source_track.on_request_keyframe(on_keyframe_request)
 
     rtsp = RtspServer()
     threading.Thread(target=rtsp.run, daemon=True).start()
