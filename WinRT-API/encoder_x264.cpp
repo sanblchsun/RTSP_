@@ -54,11 +54,11 @@ bool X264Encoder::Initialize(int width, int height, int fps, int qp)
     m_params.rc.i_lookahead = 0;
 
     m_params.i_keyint_max = fps * 2;
-    m_params.i_keyint_min = 1;
+    m_params.i_keyint_min = fps;
     m_params.i_scenecut_threshold = 0;
     m_params.i_frame_reference = 1;
     m_params.i_bframe = 0;
-    m_params.b_intra_refresh = 0;
+    m_params.b_intra_refresh = 1;
     m_params.b_deblocking_filter = 0;
     // Set x264 log callback to capture encoder errors
     m_params.pf_log = x264_log_cb;
@@ -72,7 +72,7 @@ bool X264Encoder::Initialize(int width, int height, int fps, int qp)
     // NAL HRD conformance + AUD
     m_params.b_repeat_headers = 1;
     m_params.b_annexb = 1;
-    m_params.b_aud = 1;
+    m_params.b_aud = 0;
 
     m_params.i_sps_id = 0;
 
@@ -117,9 +117,9 @@ bool X264Encoder::Initialize(int width, int height, int fps, int qp)
                 continue;
             uint8_t type = p[offset] & 0x1F;
             if (type == 7)
-                m_sps.assign(p, p + sz);
+                m_sps.assign(p + offset, p + sz);
             else if (type == 8)
-                m_pps.assign(p, p + sz);
+                m_pps.assign(p + offset, p + sz);
         }
     }
     logf("[x264] encoder initialized: %dx%d %dfps qp=%d sps=%zu pps=%zu",

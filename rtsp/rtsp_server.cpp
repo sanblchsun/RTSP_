@@ -1,7 +1,9 @@
 #include "rtsp_server.h"
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -187,7 +189,8 @@ void RtspServer::HandleClient()
 
         while (total_read < sizeof(buf) - 1)
         {
-            int n = (int)recv(fd, buf + total_read, 1, 0);
+            int n = (int)recv(fd, buf + total_read,
+                              (int)(sizeof(buf) - 1 - total_read), 0);
             if (n <= 0)
             {
                 Log("Client disconnected");

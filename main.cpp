@@ -214,6 +214,8 @@ int main(int argc, char *argv[])
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
+    const int kFps = 30;
+
     bool push_mode = false;
     std::string vps_host;
     int vps_port = 8554;
@@ -237,7 +239,7 @@ int main(int argc, char *argv[])
 
     // ---- Init capture ----
     auto capture = std::make_unique<WGCCapture>();
-    if (!capture->Initialize(30))
+    if (!capture->Initialize(kFps))
     {
         std::cerr << "Capture init failed" << std::endl;
         return -1;
@@ -249,7 +251,7 @@ int main(int argc, char *argv[])
 
     // ---- Init encoder ----
     auto encoder = std::make_unique<X264Encoder>();
-    if (!encoder->Initialize(w, h, 30, 23))
+    if (!encoder->Initialize(w, h, kFps, 23))
     {
         std::cerr << "Encoder init failed" << std::endl;
         return -1;
@@ -298,7 +300,7 @@ int main(int argc, char *argv[])
             std::cout << "[rtsp] " << msg << std::endl;
         });
         if (!sps.empty() && !pps.empty())
-            rtsp.SetVideoParams(w, h, sps, pps, 30);
+            rtsp.SetVideoParams(w, h, sps, pps, kFps);
         if (rtsp.Start(8554))
             std::cout << "RTSP ready on port 8554" << std::endl;
         else
@@ -310,11 +312,14 @@ int main(int argc, char *argv[])
     std::vector<std::vector<uint8_t>> rtp_packets;
     int fw = 0, fh = 0;
     uint32_t rtp_ts = 0;
-    const uint32_t rtp_ts_step = 90000 / 30;
+    const uint32_t rtp_ts_step = 90000 / kFps;
+    const auto frame_duration = std::chrono::milliseconds(1000 / kFps);
     int64_t frame_count = 0;
 
     while (g_running.load())
     {
+        auto frame_start = std::chrono::steady_clock::now();
+
         if (!capture->CaptureFrame(0, bgra, fw, fh))
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -374,6 +379,12 @@ int main(int argc, char *argv[])
         }
 
         frame_count++;
+
+        // Frame pacing: maintain 30 FPS even if encoder runs faster
+        auto elapsed = std::chrono::steady_clock::now() - frame_start;
+        if (elapsed < frame_duration)
+            std::this_thread::sleep_for(frame_duration - elapsed);
+
         if (frame_count % 30 == 0)
         {
             std::cout << "Frames: " << frame_count << " ("

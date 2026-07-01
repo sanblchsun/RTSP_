@@ -3,6 +3,7 @@ VPS WebRTC Relay Server
 Accepts agent as RTSP client → interleaved RTP → H.264 → WebRTC → browser.
 """
 import asyncio
+import base64
 import fractions
 import logging
 import os
@@ -28,6 +29,11 @@ HTTP_PORT = int(os.environ.get("HTTP_PORT", "8001"))
 
 relay = MediaRelay()
 source_track = None
+
+# SPS/PPS extracted from the agent's H.264 stream, used for WebRTC signalling
+_sps_data = None
+_pps_data = None
+_sps_pps_lock = threading.Lock()
 
 HTML_PAGE = """\
 <!DOCTYPE html>
@@ -101,7 +107,7 @@ class H264StreamTrack(VideoStreamTrack):
     def __init__(self, loop):
         super().__init__()
         self._loop = loop
-        self._queue = asyncio.Queue(maxsize=60)
+        self._queue = asyncio.Queue(maxsize=5)
         self._running = True
         self._frame_count = 0
         self._decode_lock = threading.Lock()
@@ -114,6 +120,16 @@ class H264StreamTrack(VideoStreamTrack):
     def feed_nal(self, nal_data: bytes):
         if not self._running:
             return
+        # Extract SPS/PPS for WebRTC signalling (sprop-parameter-sets)
+        global _sps_data, _pps_data
+        if len(nal_data) > 4 and nal_data[:4] == START_CODE:
+            nal_unit = nal_data[4:]
+            nal_type = nal_unit[0] & 0x1F
+            with _sps_pps_lock:
+                if nal_type == 7:
+                    _sps_data = bytes(nal_unit)
+                elif nal_type == 8:
+                    _pps_data = bytes(nal_unit)
         with self._decode_lock:
             try:
                 for packet in self._codec.parse(nal_data):
@@ -182,6 +198,8 @@ class RtpParser:
         fragment = payload[2:]
 
         if start:
+            if self._fua_buf is not None:
+                logger.warning("FU-A: new frame started before previous finished (dropped)")
             self._fua_buf = bytearray()
             nal_header = bytes([(payload[0] & 0xE0) | orig_type])
             self._fua_buf.extend(START_CODE)
@@ -350,6 +368,7 @@ class RtspServer:
                 while self._running:
                     try:
                         conn, addr = server.accept()
+                        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     except socket.timeout:
                         continue
                     AgentSession(conn, addr).handle()
@@ -411,7 +430,23 @@ async def offer(request: Request):
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+    sdp = pc.localDescription.sdp
+
+    # Inject sprop-parameter-sets into answer SDP so the browser can decode
+    # without waiting for an in-band IDR (critical for b_intra_refresh mode)
+    with _sps_pps_lock:
+        sps = _sps_data
+        pps = _pps_data
+    if sps and pps:
+        sprop = "{},{}".format(base64.b64encode(sps).decode(), base64.b64encode(pps).decode())
+        lines = sdp.split("\r\n")
+        for i, line in enumerate(lines):
+            if line.startswith("a=fmtp:96") and "sprop-parameter-sets" not in line:
+                lines[i] = line + ";sprop-parameter-sets=" + sprop
+                break
+        sdp = "\r\n".join(lines)
+
+    return {"sdp": sdp, "type": pc.localDescription.type}
 
 
 @app.get("/health")
