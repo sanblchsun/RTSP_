@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.15)
 project(desktop_streamer)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -36,6 +36,7 @@ if(NOT EXISTS ${X264_LIB_DIR})
     message(FATAL_ERROR "x264 lib not found: ${X264_LIB_DIR}")
 endif()
 
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(SOURCES
     main.cpp
     WinRT-API/capture_wgc.cpp

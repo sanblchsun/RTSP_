@@ -117,7 +117,8 @@ class H264StreamTrack(VideoStreamTrack):
         self._running = True
         self._decode_lock = threading.Lock()
         self._codec = av.CodecContext.create('h264', 'r')
-        self._codec.thread_count = 0
+        self._codec.thread_count = 1
+        self._codec.flags |= 0x0008  # AV_CODEC_FLAG_LOW_DELAY
         self._request_keyframe_cb = None
         self._last_pts = None
         self._last_time = 0.0
@@ -173,8 +174,8 @@ class H264StreamTrack(VideoStreamTrack):
             if pts_delta < 0:
                 pts_delta += (1 << 32) / 90000
             elapsed = time.monotonic() - self._last_time
-            wait = pts_delta - elapsed
-            if wait > 0.005:
+            wait = max(pts_delta - elapsed, 0.0)
+            if wait > 0.002:
                 await asyncio.sleep(wait)
 
         self._last_pts = frame.pts
