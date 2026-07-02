@@ -160,7 +160,11 @@ class H264StreamTrack(VideoStreamTrack):
         try:
             self._queue.put_nowait(frame)
         except asyncio.QueueFull:
-            pass
+            try:
+                self._queue.get_nowait()
+                self._queue.put_nowait(frame)
+            except asyncio.QueueEmpty:
+                pass
 
     async def recv(self):
         frame = await self._queue.get()
@@ -291,7 +295,6 @@ class AgentSession:
     def handle(self):
         logger.info("Agent connected: %s", self._addr[0])
         session_id = "12345678"
-        buf_log_interval = 0
 
         while self._running:
             try:
@@ -304,11 +307,6 @@ class AgentSession:
             self._buf += data
 
             while self._buf:
-                buf_log_interval += 1
-                if buf_log_interval % 100 == 0:
-                    logger.info("TCP buf: %d bytes, RTSP play=%s",
-                                len(self._buf), self._play_sent)
-
                 # Try interleaved RTP ($ + channel + 2B length)
                 if self._buf[0] == 0x24 and len(self._buf) >= 4:
                     pkt_len = struct.unpack('>H', self._buf[2:4])[0]
