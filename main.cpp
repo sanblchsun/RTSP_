@@ -23,7 +23,9 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mmsystem.h>
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "winmm.lib")
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -342,6 +344,7 @@ int main(int argc, char *argv[])
     }
 
     // ---- Main loop ----
+    timeBeginPeriod(1);
     std::vector<uint8_t> bgra, nals;
     std::vector<std::vector<uint8_t>> rtp_packets;
     int fw = 0, fh = 0;
@@ -436,6 +439,7 @@ int main(int argc, char *argv[])
     rtsp_client.Disconnect();
     encoder->Shutdown();
     capture->Shutdown();
+    timeEndPeriod(1);
     std::cout << "\nDone. " << frame_count << " frames" << std::endl;
     return 0;
 }
