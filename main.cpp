@@ -353,7 +353,6 @@ int main(int argc, char *argv[])
 
     while (g_running.load())
     {
-        next_frame += frame_duration;
 
         if (!capture->CaptureFrame(0, bgra, fw, fh))
         {
@@ -422,7 +421,7 @@ int main(int argc, char *argv[])
         }
 
         frame_count++;
-
+        next_frame += frame_duration;
         std::this_thread::sleep_until(next_frame);
 
         if (frame_count % 30 == 0)

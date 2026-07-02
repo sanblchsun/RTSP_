@@ -117,7 +117,7 @@ class H264StreamTrack(VideoStreamTrack):
         self._running = True
         self._decode_lock = threading.Lock()
         self._codec = av.CodecContext.create('h264', 'r')
-        self._codec.thread_count = 0
+        self._codec.thread_count = 1
         self._request_keyframe_cb = None
         self._last_pts = None
         self._last_time = 0.0
