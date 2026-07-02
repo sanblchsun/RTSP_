@@ -117,6 +117,8 @@ class H264StreamTrack(VideoStreamTrack):
         self._codec = av.CodecContext.create('h264', 'r')
         self._codec.thread_count = 0
         self._request_keyframe_cb = None
+        self._last_pts = None
+        self._last_time = 0.0
 
     def on_request_keyframe(self, cb):
         self._request_keyframe_cb = cb
@@ -161,7 +163,20 @@ class H264StreamTrack(VideoStreamTrack):
             pass
 
     async def recv(self):
-        return await self._queue.get()
+        frame = await self._queue.get()
+
+        if self._last_pts is not None:
+            pts_delta = (frame.pts - self._last_pts) / 90000
+            if pts_delta < 0:
+                pts_delta += (1 << 32) / 90000
+            elapsed = time.monotonic() - self._last_time
+            wait = pts_delta - elapsed
+            if wait > 0.005:
+                await asyncio.sleep(wait)
+
+        self._last_pts = frame.pts
+        self._last_time = time.monotonic()
+        return frame
 
 
 RTP_HEADER_SIZE = 12
