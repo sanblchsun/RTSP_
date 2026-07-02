@@ -240,9 +240,11 @@ class RtpParser:
         elif self._fua_buf is not None:
             self._fua_buf.extend(fragment)
             if end:
-                if source_track is not None:
-                    source_track.feed_nal(bytes(self._fua_buf), self._fua_ts)
-                self._fua_buf = None
+                try:
+                    if source_track is not None:
+                        source_track.feed_nal(bytes(self._fua_buf), self._fua_ts)
+                finally:
+                    self._fua_buf = None
         elif end:
             self._fua_buf = None
 
