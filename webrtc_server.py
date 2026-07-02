@@ -227,7 +227,8 @@ class RtpParser:
 
         if start:
             if self._fua_buf is not None:
-                logger.warning("FU-A: new frame started before previous finished (dropped)")
+                logger.warning("FU-A drop: buf=%d prev_ts=%d cur_ts=%d",
+                               len(self._fua_buf), self._fua_ts, rtp_timestamp)
             self._fua_buf = bytearray()
             self._fua_ts = rtp_timestamp
             nal_header = bytes([(payload[0] & 0xE0) | orig_type])
@@ -286,6 +287,7 @@ class AgentSession:
     def handle(self):
         logger.info("Agent connected: %s", self._addr[0])
         session_id = "12345678"
+        buf_log_interval = 0
 
         while self._running:
             try:
@@ -298,6 +300,11 @@ class AgentSession:
             self._buf += data
 
             while self._buf:
+                buf_log_interval += 1
+                if buf_log_interval % 100 == 0:
+                    logger.info("TCP buf: %d bytes, RTSP play=%s",
+                                len(self._buf), self._play_sent)
+
                 # Try interleaved RTP ($ + channel + 2B length)
                 if self._buf[0] == 0x24 and len(self._buf) >= 4:
                     pkt_len = struct.unpack('>H', self._buf[2:4])[0]

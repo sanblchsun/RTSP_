@@ -93,3 +93,56 @@
 
 **Исправление (`WinRT-API/encoder_x264.cpp`):**
 - `X264Encoder::RequestKeyframe()` — вызывает `x264_encoder_intra_refresh(m_encoder)` для сброса цикла intra refresh. Следующие кадры обновляют макроблоки с начала, браузер быстрее получает полную картинку.
+
+---
+
+## Раунд 3: Ускорение воспроизведения в браузере («догонялки»)
+
+**Симптом:** Видео в браузере играет плавно, но периодически резко ускоряется, «догоняя» реальное время. Особенно заметно при работе через VPS в интернете.
+
+**Причина:** Два фактора, работающих вместе:
+
+1. **Синтетический PTS на сервере** — `H264StreamTrack.feed_nal()` устанавливал `frame.pts = frame_count` с `time_base = 1/30` (счётчик кадров), игнорируя оригинальный RTP timestamp (90kHz) из пакета агента. WebRTC не мог корректно определить, когда показывать каждый кадр.
+
+2. **TCP пульсация между агентом и VPS** — TCP-соединение через интернет вносит вариативную задержку (джиттер). Несколько RTP-пакетов задерживаются, потом прилетают пачкой. `recv()` отдавал их в aiortc мгновенно, WebRTC отправлял браузеру burst кадров → браузерный adaptive jitter buffer ускорял воспроизведение, чтобы сбросить «навал».
+
+### (`webrtc_server.py`): Оригинальный RTP timestamp как PTS
+
+**Было (`H264StreamTrack.feed_nal`):**
+```python
+frame.pts = self._frame_count
+frame.time_base = fractions.Fraction(1, 30)
+self._frame_count += 1
+```
+
+**Стало (`RtpParser` + `H264StreamTrack.feed_nal`):**
+- `RtpParser.feed_rtp()` извлекает 32-bit RTP timestamp из RTP-хедера (`data[4:8]`, big-endian) и передаёт во все `feed_nal()`
+- `_handle_fua()` сохраняет timestamp при старте FU-A (`self._fua_ts`) и отдаёт при сборке последнего фрагмента
+- `_handle_stapa()` передаёт один timestamp для всех NAL внутри STAP-A
+- `H264StreamTrack.feed_nal()` теперь принимает `rtp_timestamp`:
+  ```python
+  frame.pts = rtp_timestamp
+  frame.time_base = fractions.Fraction(1, 90000)
+  ```
+- Удалён `self._frame_count` — больше не нужен
+
+**Результат:** WebRTC получает оригинальные 90kHz таймстемпы. Браузерный jitter buffer корректно рассчитывает время показа кадров, опираясь на реальные интервалы захвата на агенте.
+
+### (`webrtc_server.py`): Pacing в `recv()` — защита от TCP burst
+
+**Было (`H264StreamTrack.recv`):**
+```python
+async def recv(self):
+    return await self._queue.get()
+```
+
+**Стало:** Добавлен pacing на основе RTP timestamp:
+- В `__init__` добавлены `_last_pts` и `_last_time` (последний PTS и монотонные часы)
+- В `recv()` после получения кадра:
+  - Вычисляется ожидаемый интервал: `pts_delta = (frame.pts - last_pts) / 90000`
+  - Учитывается uint32 wrap-around (раз в ~13 часов)
+  - Вычисляется реально прошедшее время: `elapsed = time.monotonic() - last_time`
+  - Если идём быстрее реальности (`wait = pts_delta - elapsed > 5ms`) — `asyncio.sleep(wait)`
+- Кадры уходят в aiortc/WebRTC с той же скоростью, с какой их захватил агент (30fps)
+
+**Результат:** Burst'ы TCP не доходят до браузера — pacing на стороне сервера растягивает пачки кадров на правильные интервалы. Jitter buffer браузера не видит «навала» и не включает ускоренное воспроизведение. Ускорения («догонялки») исчезают.
