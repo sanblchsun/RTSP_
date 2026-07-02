@@ -226,15 +226,17 @@ class RtpParser:
         fragment = payload[2:]
 
         if start:
-            if self._fua_buf is not None:
+            if self._fua_buf is not None and self._fua_ts != rtp_timestamp:
                 logger.warning("FU-A drop: buf=%d prev_ts=%d cur_ts=%d",
                                len(self._fua_buf), self._fua_ts, rtp_timestamp)
-            self._fua_buf = bytearray()
-            self._fua_ts = rtp_timestamp
-            nal_header = bytes([(payload[0] & 0xE0) | orig_type])
-            self._fua_buf.extend(START_CODE)
-            self._fua_buf.extend(nal_header)
-            self._fua_buf.extend(fragment)
+                self._fua_buf = None
+            if self._fua_buf is None:
+                self._fua_buf = bytearray()
+                self._fua_ts = rtp_timestamp
+                nal_header = bytes([(payload[0] & 0xE0) | orig_type])
+                self._fua_buf.extend(START_CODE)
+                self._fua_buf.extend(nal_header)
+                self._fua_buf.extend(fragment)
         elif self._fua_buf is not None:
             self._fua_buf.extend(fragment)
             if end:
