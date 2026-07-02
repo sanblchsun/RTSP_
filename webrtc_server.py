@@ -4,6 +4,7 @@ Accepts agent as RTSP client → interleaved RTP → H.264 → WebRTC → browse
 """
 import asyncio
 import base64
+from collections import deque
 import fractions
 import logging
 import os
@@ -111,7 +112,8 @@ class H264StreamTrack(VideoStreamTrack):
     def __init__(self, loop):
         super().__init__()
         self._loop = loop
-        self._queue = asyncio.Queue(maxsize=5)
+        self._deque = deque(maxlen=5)
+        self._has_frames = asyncio.Event()
         self._running = True
         self._decode_lock = threading.Lock()
         self._codec = av.CodecContext.create('h264', 'r')
@@ -157,17 +159,14 @@ class H264StreamTrack(VideoStreamTrack):
                 logger.warning("Decode error: %s", e)
 
     def _put(self, frame):
-        try:
-            self._queue.put_nowait(frame)
-        except asyncio.QueueFull:
-            try:
-                self._queue.get_nowait()
-                self._queue.put_nowait(frame)
-            except asyncio.QueueEmpty:
-                pass
+        self._deque.append(frame)
+        self._has_frames.set()
 
     async def recv(self):
-        frame = await self._queue.get()
+        while not self._deque:
+            self._has_frames.clear()
+            await self._has_frames.wait()
+        frame = self._deque.popleft()
 
         if self._last_pts is not None:
             pts_delta = (frame.pts - self._last_pts) / 90000
