@@ -173,8 +173,8 @@ class H264StreamTrack(VideoStreamTrack):
             if pts_delta < 0:
                 pts_delta += (1 << 32) / 90000
             elapsed = time.monotonic() - self._last_time
-            wait = max(pts_delta - elapsed, 0.0)
-            if wait > 0.002:
+            wait = pts_delta - elapsed
+            if wait > 0.005:
                 await asyncio.sleep(wait)
 
         self._last_pts = frame.pts
@@ -240,6 +240,10 @@ class RtpParser:
                 self._fua_buf.extend(START_CODE)
                 self._fua_buf.extend(nal_header)
                 self._fua_buf.extend(fragment)
+                if end:
+                    if source_track is not None:
+                        source_track.feed_nal(bytes(self._fua_buf), self._fua_ts)
+                    self._fua_buf = None
         elif self._fua_buf is not None:
             self._fua_buf.extend(fragment)
             if end:
