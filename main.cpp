@@ -351,12 +351,11 @@ int main(int argc, char *argv[])
     uint32_t rtp_ts = 0;
     const uint32_t rtp_ts_step = 90000 / kFps;
     const auto frame_duration = std::chrono::nanoseconds(1000000000LL / kFps);
+    auto next_frame = std::chrono::steady_clock::now();
     int64_t frame_count = 0;
 
     while (g_running.load())
     {
-        auto frame_start = std::chrono::steady_clock::now();
-
         if (!capture->CaptureFrame(0, bgra, fw, fh))
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -424,9 +423,11 @@ int main(int argc, char *argv[])
         }
 
         frame_count++;
-        auto elapsed = std::chrono::steady_clock::now() - frame_start;
-        if (elapsed < frame_duration)
-            std::this_thread::sleep_for(frame_duration - elapsed);
+
+        next_frame += frame_duration;
+        std::this_thread::sleep_until(next_frame);
+        if (next_frame < std::chrono::steady_clock::now())
+            next_frame = std::chrono::steady_clock::now();
 
         if (frame_count % 30 == 0)
         {

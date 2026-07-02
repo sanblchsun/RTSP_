@@ -174,7 +174,7 @@ class H264StreamTrack(VideoStreamTrack):
                 pts_delta += (1 << 32) / 90000
             elapsed = time.monotonic() - self._last_time
             wait = pts_delta - elapsed
-            if wait > 0.005:
+            if wait > 0.002:
                 await asyncio.sleep(wait)
 
         self._last_pts = frame.pts
