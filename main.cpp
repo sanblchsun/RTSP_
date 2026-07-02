@@ -347,12 +347,13 @@ int main(int argc, char *argv[])
     int fw = 0, fh = 0;
     uint32_t rtp_ts = 0;
     const uint32_t rtp_ts_step = 90000 / kFps;
-    const auto frame_duration = std::chrono::milliseconds(1000 / kFps);
+    const auto frame_duration = std::chrono::nanoseconds(1000000000LL / kFps);
+    auto next_frame = std::chrono::steady_clock::now();
     int64_t frame_count = 0;
 
     while (g_running.load())
     {
-        auto frame_start = std::chrono::steady_clock::now();
+        next_frame += frame_duration;
 
         if (!capture->CaptureFrame(0, bgra, fw, fh))
         {
@@ -422,10 +423,7 @@ int main(int argc, char *argv[])
 
         frame_count++;
 
-        // Frame pacing: maintain 30 FPS even if encoder runs faster
-        auto elapsed = std::chrono::steady_clock::now() - frame_start;
-        if (elapsed < frame_duration)
-            std::this_thread::sleep_for(frame_duration - elapsed);
+        std::this_thread::sleep_until(next_frame);
 
         if (frame_count % 30 == 0)
         {
