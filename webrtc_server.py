@@ -113,7 +113,6 @@ class H264StreamTrack(VideoStreamTrack):
         self._loop = loop
         self._queue = asyncio.Queue(maxsize=5)
         self._running = True
-        self._frame_count = 0
         self._decode_lock = threading.Lock()
         self._codec = av.CodecContext.create('h264', 'r')
         self._codec.thread_count = 0
@@ -130,7 +129,7 @@ class H264StreamTrack(VideoStreamTrack):
     def stop(self):
         self._running = False
 
-    def feed_nal(self, nal_data: bytes):
+    def feed_nal(self, nal_data: bytes, rtp_timestamp: int):
         if not self._running:
             return
         # Extract SPS/PPS for WebRTC signalling (sprop-parameter-sets)
@@ -149,9 +148,8 @@ class H264StreamTrack(VideoStreamTrack):
                     for frame in self._codec.decode(packet):
                         if frame.width is None or frame.height is None:
                             continue
-                        frame.pts = self._frame_count
-                        frame.time_base = fractions.Fraction(1, 30)
-                        self._frame_count += 1
+                        frame.pts = rtp_timestamp
+                        frame.time_base = fractions.Fraction(1, 90000)
                         self._loop.call_soon_threadsafe(self._put, frame)
             except Exception as e:
                 logger.warning("Decode error: %s", e)
@@ -175,6 +173,7 @@ class RtpParser:
 
     def __init__(self):
         self._fua_buf = None
+        self._fua_ts = 0
 
     def feed_rtp(self, data: bytes):
         global source_track
@@ -187,6 +186,7 @@ class RtpParser:
         if (data[1] & 0x7F) != 96:
             return
 
+        rtp_timestamp = struct.unpack('>I', data[4:8])[0]
         payload = data[RTP_HEADER_SIZE:]
         if not payload:
             return
@@ -195,15 +195,15 @@ class RtpParser:
 
         try:
             if nal_type == 28:
-                self._handle_fua(payload)
+                self._handle_fua(payload, rtp_timestamp)
             elif nal_type == 24:
-                self._handle_stapa(payload)
+                self._handle_stapa(payload, rtp_timestamp)
             elif nal_type <= 23:
-                source_track.feed_nal(START_CODE + payload)
+                source_track.feed_nal(START_CODE + payload, rtp_timestamp)
         except Exception as e:
             logger.warning("RTP parse error: %s", e)
 
-    def _handle_fua(self, payload: bytes):
+    def _handle_fua(self, payload: bytes, rtp_timestamp: int):
         header = payload[1]
         start = (header >> 7) & 1
         end = (header >> 6) & 1
@@ -214,6 +214,7 @@ class RtpParser:
             if self._fua_buf is not None:
                 logger.warning("FU-A: new frame started before previous finished (dropped)")
             self._fua_buf = bytearray()
+            self._fua_ts = rtp_timestamp
             nal_header = bytes([(payload[0] & 0xE0) | orig_type])
             self._fua_buf.extend(START_CODE)
             self._fua_buf.extend(nal_header)
@@ -222,12 +223,12 @@ class RtpParser:
             self._fua_buf.extend(fragment)
             if end:
                 if source_track is not None:
-                    source_track.feed_nal(bytes(self._fua_buf))
+                    source_track.feed_nal(bytes(self._fua_buf), self._fua_ts)
                 self._fua_buf = None
         elif end:
             self._fua_buf = None
 
-    def _handle_stapa(self, payload: bytes):
+    def _handle_stapa(self, payload: bytes, rtp_timestamp: int):
         offset = 1
         while offset + 2 <= len(payload):
             nalu_size = struct.unpack('>H', payload[offset:offset+2])[0]
@@ -235,7 +236,7 @@ class RtpParser:
             if offset + nalu_size > len(payload):
                 break
             if source_track is not None:
-                source_track.feed_nal(START_CODE + payload[offset:offset+nalu_size])
+                source_track.feed_nal(START_CODE + payload[offset:offset+nalu_size], rtp_timestamp)
             offset += nalu_size
 
 
