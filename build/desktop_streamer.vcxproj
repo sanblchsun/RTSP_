@@ -373,15 +373,11 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="C:\Users\user\project\RTSP_\main.cpp" />
-    <ClCompile Include="C:\Users\user\project\RTSP_\desktop_streamer.cpp" />
     <ClCompile Include="C:\Users\user\project\RTSP_\WinRT-API\capture_wgc.cpp" />
     <ClCompile Include="C:\Users\user\project\RTSP_\WinRT-API\encoder_x264.cpp" />
     <ClCompile Include="C:\Users\user\project\RTSP_\rtp\h264_rtp_packetizer.cpp" />
     <ClCompile Include="C:\Users\user\project\RTSP_\rtsp\rtsp_server.cpp" />
-    <ClInclude Include="C:\Users\user\project\RTSP_\desktop_streamer.h" />
-    <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\capture_base.h" />
     <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\capture_wgc.h" />
-    <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\encoder.h" />
     <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\encoder_x264.h" />
     <ClInclude Include="C:\Users\user\project\RTSP_\rtp\rtp_header.h" />
     <ClInclude Include="C:\Users\user\project\RTSP_\rtp\h264_rtp_packetizer.h" />

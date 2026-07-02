@@ -4,9 +4,6 @@
     <ClCompile Include="C:\Users\user\project\RTSP_\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="C:\Users\user\project\RTSP_\desktop_streamer.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="C:\Users\user\project\RTSP_\WinRT-API\capture_wgc.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -21,16 +18,7 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="C:\Users\user\project\RTSP_\desktop_streamer.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\capture_base.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\capture_wgc.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\encoder.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\encoder_x264.h">

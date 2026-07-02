@@ -1,0 +1,7 @@
+# ninja log v7
+13	812	8047082444309832	CMakeFiles/desktop_streamer.dir/WinRT-API/encoder_x264.cpp.obj	a7950ea7977d8c1c
+19	818	8047082444470448	CMakeFiles/desktop_streamer.dir/rtp/h264_rtp_packetizer.cpp.obj	91d21aff3cf41898
+23	2570	8047082444470448	CMakeFiles/desktop_streamer.dir/rtsp/rtsp_server.cpp.obj	c20391acbefb33ab
+6	4020	8047082444309832	CMakeFiles/desktop_streamer.dir/main.cpp.obj	6c266692633f1488
+10	5623	8047082444309832	CMakeFiles/desktop_streamer.dir/WinRT-API/capture_wgc.cpp.obj	134e47fc616f092a
+5627	6263	8047082500561989	desktop_streamer.exe	a9ac03f77a703db2

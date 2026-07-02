@@ -317,7 +317,7 @@ int main(int argc, char *argv[])
 
     // ---- Setup ----
     H264RtpPacketizer packetizer;
-    packetizer.SetMaxPayloadSize(1400);
+    packetizer.SetMaxPayloadSize(8000);
     packetizer.SetSsrc(0xDEADBEEF);
 
     RtspServer rtsp;

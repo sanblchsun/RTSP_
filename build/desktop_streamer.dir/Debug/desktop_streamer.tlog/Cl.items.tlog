@@ -1,0 +1,5 @@
+C:\Users\user\project\RTSP_\main.cpp;C:\Users\user\project\RTSP_\build\desktop_streamer.dir\Debug\main.obj
+C:\Users\user\project\RTSP_\WinRT-API\capture_wgc.cpp;C:\Users\user\project\RTSP_\build\desktop_streamer.dir\Debug\capture_wgc.obj
+C:\Users\user\project\RTSP_\WinRT-API\encoder_x264.cpp;C:\Users\user\project\RTSP_\build\desktop_streamer.dir\Debug\encoder_x264.obj
+C:\Users\user\project\RTSP_\rtp\h264_rtp_packetizer.cpp;C:\Users\user\project\RTSP_\build\desktop_streamer.dir\Debug\h264_rtp_packetizer.obj
+C:\Users\user\project\RTSP_\rtsp\rtsp_server.cpp;C:\Users\user\project\RTSP_\build\desktop_streamer.dir\Debug\rtsp_server.obj
