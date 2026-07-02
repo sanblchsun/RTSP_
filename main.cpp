@@ -174,7 +174,7 @@ private:
     SOCKET sock_ = INVALID_SOCKET;
     bool handshake_done_ = false;
     bool keyframe_requested_ = false;
-    char recv_buf_[4096];
+    char recv_buf_[4096] = {};
 
     void send_req(const std::string &req)
     {
