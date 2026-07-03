@@ -38,6 +38,15 @@
 #define closesocket(x) close(x)
 #endif
 
+// ---- Tuning parameters ----
+static const int kFps = 15;
+// для kQp
+// 23	отличное ~5-8 Mbps
+// 25	хорошее	 ~3-5 Mbps
+// 28	среднее	 ~2-3 Mbps
+// 30	низкое	 ~1-2 Mbps
+static const int kQp = 28;
+
 static std::atomic<bool> g_running{true};
 
 void signal_handler(int)
@@ -250,7 +259,7 @@ int main(int argc, char *argv[])
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    const int kFps = 30;
+    // Server's frame queue size (webrtc_server.py: deque maxlen) = 20
 
     bool push_mode = false;
     std::string vps_host;
@@ -287,7 +296,7 @@ int main(int argc, char *argv[])
 
     // ---- Init encoder ----
     auto encoder = std::make_unique<X264Encoder>();
-    if (!encoder->Initialize(w, h, kFps, 23))
+    if (!encoder->Initialize(w, h, kFps, kQp))
     {
         std::cerr << "Encoder init failed" << std::endl;
         return -1;
