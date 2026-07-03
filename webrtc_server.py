@@ -213,7 +213,7 @@ class H264StreamTrack(VideoStreamTrack):
     def __init__(self, loop):
         super().__init__()
         self._loop = loop
-        self._deque = deque(maxlen=10)
+        self._deque = deque(maxlen=20)
         self._has_frames = asyncio.Event()
         self._running = True
         self._decode_lock = threading.Lock()
@@ -222,7 +222,7 @@ class H264StreamTrack(VideoStreamTrack):
         self._request_keyframe_cb = None
         self._last_pts = None
         self._last_time = 0.0
-        self._maxlen = 10
+        self._maxlen = 20
 
     def on_request_keyframe(self, cb):
         self._request_keyframe_cb = cb
@@ -271,9 +271,18 @@ class H264StreamTrack(VideoStreamTrack):
         self._has_frames.set()
 
     async def recv(self):
-        while not self._deque:
+        if not self._deque:
             self._has_frames.clear()
-            await self._has_frames.wait()
+            starved_since = time.monotonic()
+            while not self._deque:
+                try:
+                    await asyncio.wait_for(self._has_frames.wait(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    starved_ms = (time.monotonic() - starved_since) * 1000
+                    if starved_ms > 200:
+                        logger.warning("Queue starved for %.0fms", starved_ms)
+                        starved_since = time.monotonic()
+            logger.info("Queue recovered after starvation")
         frame = self._deque.popleft()
 
         if self._last_pts is not None:
@@ -617,6 +626,26 @@ async def offer(request: Request):
     async def on_connection_state():
         if pc.connectionState in ("failed", "closed"):
             await pc.close()
+
+    async def log_webrtc_stats():
+        while True:
+            await asyncio.sleep(5)
+            try:
+                stats = await pc.getStats()
+                for s in stats.values():
+                    if s.type == 'inbound-rtp' and s.kind == 'video':
+                        lost = getattr(s, 'packetsLost', 0)
+                        jitter_ms = getattr(s, 'jitter', 0) * 1000
+                        rtt = getattr(s, 'roundTripTime', None)
+                        rtt_ms = rtt * 1000 if rtt else 0
+                        logger.info(
+                            "[WEBRTC] packetsLost=%d jitter=%.1fms rtt=%.1fms",
+                            lost, jitter_ms, rtt_ms,
+                        )
+            except Exception:
+                break
+
+    asyncio.create_task(log_webrtc_stats())
 
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
