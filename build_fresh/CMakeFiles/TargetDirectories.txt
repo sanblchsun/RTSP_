@@ -1,3 +1,0 @@
-C:/Users/user/project/RTSP_/build_fresh/CMakeFiles/desktop_streamer.dir
-C:/Users/user/project/RTSP_/build_fresh/CMakeFiles/ALL_BUILD.dir
-C:/Users/user/project/RTSP_/build_fresh/CMakeFiles/ZERO_CHECK.dir

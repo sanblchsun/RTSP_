@@ -1,0 +1,10 @@
+^C:\USERS\USER\PROJECT\RTSP_\BUILD64\CMAKEFILES\3ED581D707869ACA03383EBC92BD996E\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/user/project/RTSP_ -BC:/Users/user/project/RTSP_/build64 --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/user/project/RTSP_/build64/desktop_streamer.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

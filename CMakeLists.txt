@@ -36,6 +36,7 @@ if(NOT EXISTS ${X264_LIB_DIR})
     message(FATAL_ERROR "x264 lib not found: ${X264_LIB_DIR}")
 endif()
 
+# libx264 rebuilt with /MT, so we can use static CRT
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 set(SOURCES
     main.cpp
@@ -67,10 +68,10 @@ if(NOT X264_LIBRARY)
     message(FATAL_ERROR "x264 library not found in ${X264_LIB_DIR}")
 endif()
 
-target_link_libraries(desktop_streamer ${X264_LIBRARY})
+target_link_libraries(desktop_streamer PRIVATE ${X264_LIBRARY})
 
 if(WIN32)
-    target_link_libraries(desktop_streamer
+    target_link_libraries(desktop_streamer PRIVATE
         ws2_32
         d3d11
         dxgi
@@ -82,6 +83,8 @@ if(WIN32)
         runtimeobject
     )
 endif()
+
+
 
 if(MSVC)
     target_compile_definitions(desktop_streamer PRIVATE
