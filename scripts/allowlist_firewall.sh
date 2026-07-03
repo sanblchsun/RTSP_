@@ -5,9 +5,11 @@ set -euo pipefail
 # Usage: sudo ./allowlist_firewall.sh 1.2.3.4 [5.6.7.8 ...]
 # The script will configure UFW if present, otherwise fall back to iptables.
 # It restricts incoming connections to a small set of ports (default: 22,8001,8554)
+# and a UDP ephemeral range (default: 49152:65535) for WebRTC media.
 # allowing only the provided source IP addresses. Use with caution when remote.
 
 PORTS=(22 8001 8554)
+UDP_PORTS="49152:65535"
 METADATA_FILE=/etc/allowlist_firewall.meta
 
 # Mode detection: --revert / --disable to undo changes, otherwise treat args as IPs
@@ -28,7 +30,8 @@ if [ "$MODE" = apply ] && [ ${#IPS[@]} -eq 0 ]; then
 fi
 
 echo "Allowed IPs: ${IPS[*]}"
-echo "Ports: ${PORTS[*]}"
+echo "TCP Ports: ${PORTS[*]}"
+echo "UDP Range: ${UDP_PORTS}"
 
 # Safety: if running remotely, warn user about lockout
 if [ -n "${SSH_CONNECTION:-}" ]; then
@@ -52,6 +55,8 @@ if command_exists ufw; then
       echo "Allowing $ip -> port $p/tcp"
       sudo ufw allow from "$ip" to any port "$p" proto tcp
     done
+    echo "Allowing $ip -> ports ${UDP_PORTS}/udp (WebRTC ICE/media)"
+    sudo ufw allow from "$ip" to any port "${UDP_PORTS}" proto udp
   done
 
   echo "Enabling UFW..."
@@ -94,6 +99,8 @@ if command_exists iptables; then
       echo "Allowing $ip -> port $p/tcp"
       sudo iptables -A INPUT -p tcp -s "$ip" --dport "$p" -m conntrack --ctstate NEW -j ACCEPT
     done
+    echo "Allowing $ip -> ports ${UDP_PORTS}/udp (WebRTC ICE/media)"
+    sudo iptables -A INPUT -p udp -s "$ip" --dport "${UDP_PORTS}" -m conntrack --ctstate NEW -j ACCEPT
   done
 
   # Optional: allow ICMP (ping)
