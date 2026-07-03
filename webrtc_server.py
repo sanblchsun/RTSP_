@@ -25,11 +25,112 @@ from aiortc.contrib.media import MediaRelay
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+class Diagnostics:
+    def __init__(self, label="stream"):
+        self._label = label
+        self._lock = threading.Lock()
+        self._last_report = 0.0
+        self._report_interval = 10.0
+
+        self._rtp_count = 0
+        self._rtp_arrival_deltas = []
+        self._rtp_seq_gaps = 0
+        self._rtp_total_gaps = 0
+        self._last_arrival = None
+        self._last_seq = -1
+
+        self._deque_overflow = 0
+        self._deque_hits = 0
+
+        self._pacing_wait_30_100 = 0
+        self._pacing_wait_over_100 = 0
+        self._pacing_samples = 0
+
+        self._decode_errors = 0
+
+    def on_rtp_arrival(self, now, seq):
+        with self._lock:
+            self._rtp_count += 1
+            if self._last_arrival is not None:
+                delta = (now - self._last_arrival) * 1000
+                self._rtp_arrival_deltas.append(delta)
+            self._last_arrival = now
+            if self._last_seq >= 0:
+                gap = (seq - self._last_seq - 1) & 0xFFFF
+                if gap > 0:
+                    self._rtp_seq_gaps += gap
+                    self._rtp_total_gaps += 1
+            self._last_seq = seq
+
+    def on_frame_put(self, deque_len, maxlen):
+        with self._lock:
+            self._deque_hits += 1
+            if deque_len >= maxlen:
+                self._deque_overflow += 1
+
+    def on_pacing_wait(self, wait_ms):
+        with self._lock:
+            self._pacing_samples += 1
+            if wait_ms > 100:
+                self._pacing_wait_over_100 += 1
+            elif wait_ms > 30:
+                self._pacing_wait_30_100 += 1
+
+    def on_decode_error(self):
+        with self._lock:
+            self._decode_errors += 1
+
+    def maybe_report(self):
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_report < self._report_interval:
+                return
+            self._last_report = now
+
+            if self._rtp_count == 0:
+                return
+
+            all_deltas = self._rtp_arrival_deltas
+
+            net_delays = sum(1 for d in all_deltas if d > 50)
+            net_stalls = sum(1 for d in all_deltas if d > 200)
+
+            avg_arrival = sum(all_deltas) / len(all_deltas) if all_deltas else 0.0
+            max_arrival = max(all_deltas) if all_deltas else 0.0
+
+            logger.info(
+                "[DIAG %s] frames=%d rtp=%d | "
+                "net: avg_arr=%.1fms max_arr=%.0fms delays=%d stalls=%d | "
+                "seq: gaps=%d events=%d | "
+                "dec: errors=%d | "
+                "deq: overflow=%d hits=%d | "
+                "pace: over100=%d over30=%d samples=%d",
+                self._label,
+                self._deque_hits, self._rtp_count,
+                avg_arrival, max_arrival, net_delays, net_stalls,
+                self._rtp_seq_gaps, self._rtp_total_gaps,
+                self._decode_errors,
+                self._deque_overflow, self._deque_hits,
+                self._pacing_wait_over_100, self._pacing_wait_30_100, self._pacing_samples,
+            )
+
+            self._rtp_arrival_deltas = []
+            self._rtp_seq_gaps = 0
+            self._rtp_total_gaps = 0
+            self._deque_overflow = 0
+            self._deque_hits = 0
+            self._pacing_wait_30_100 = 0
+            self._pacing_wait_over_100 = 0
+            self._pacing_samples = 0
+            self._decode_errors = 0
+
 RTSP_PORT = int(os.environ.get("RTSP_PORT", "8554"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8001"))
 
 relay = MediaRelay()
 source_track = None
+_diag = None
 
 # SPS/PPS extracted from the agent's H.264 stream, used for WebRTC signalling
 _sps_data = None
@@ -121,6 +222,7 @@ class H264StreamTrack(VideoStreamTrack):
         self._request_keyframe_cb = None
         self._last_pts = None
         self._last_time = 0.0
+        self._maxlen = 10
 
     def on_request_keyframe(self, cb):
         self._request_keyframe_cb = cb
@@ -157,8 +259,14 @@ class H264StreamTrack(VideoStreamTrack):
                         self._loop.call_soon_threadsafe(self._put, frame)
             except Exception as e:
                 logger.warning("Decode error: %s", e)
+                diag = _diag
+                if diag:
+                    diag.on_decode_error()
 
     def _put(self, frame):
+        diag = _diag
+        if diag:
+            diag.on_frame_put(len(self._deque), self._maxlen)
         self._deque.append(frame)
         self._has_frames.set()
 
@@ -175,6 +283,9 @@ class H264StreamTrack(VideoStreamTrack):
             elapsed = time.monotonic() - self._last_time
             wait = pts_delta - elapsed
             if wait > 0.002:
+                diag = _diag
+                if diag:
+                    diag.on_pacing_wait(wait * 1000)
                 await asyncio.sleep(wait)
 
         self._last_pts = frame.pts
@@ -192,9 +303,11 @@ class RtpParser:
     def __init__(self):
         self._fua_buf = None
         self._fua_ts = 0
+        self._last_arrival = None
+        self._last_seq = -1
 
     def feed_rtp(self, data: bytes):
-        global source_track
+        global source_track, _diag
         if source_track is None:
             return
         if len(data) < RTP_HEADER_SIZE:
@@ -205,7 +318,12 @@ class RtpParser:
             return
 
         rtp_timestamp = struct.unpack('>I', data[4:8])[0]
+        rtp_seq = struct.unpack('>H', data[2:4])[0]
         payload = data[RTP_HEADER_SIZE:]
+        now = time.monotonic()
+
+        if _diag:
+            _diag.on_rtp_arrival(now, rtp_seq)
         if not payload:
             return
 
@@ -298,8 +416,15 @@ class AgentSession:
     def handle(self):
         logger.info("Agent connected: %s", self._addr[0])
         session_id = "12345678"
+        diag_report_counter = 0
 
         while self._running:
+            diag_report_counter += 1
+            if diag_report_counter % 300 == 0:
+                diag = _diag
+                if diag:
+                    diag.maybe_report()
+
             try:
                 data = self._conn.recv(65536)
             except Exception:
@@ -447,9 +572,10 @@ class RtspServer:
 
 @asynccontextmanager
 async def lifespan(app):
-    global source_track
+    global source_track, _diag
     loop = asyncio.get_running_loop()
     source_track = H264StreamTrack(loop)
+    _diag = Diagnostics("stream")
 
     def on_keyframe_request():
         global _agent_session
