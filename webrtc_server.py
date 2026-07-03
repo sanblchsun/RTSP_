@@ -112,7 +112,7 @@ class H264StreamTrack(VideoStreamTrack):
     def __init__(self, loop):
         super().__init__()
         self._loop = loop
-        self._deque = deque(maxlen=5)
+        self._deque = deque(maxlen=10)
         self._has_frames = asyncio.Event()
         self._running = True
         self._decode_lock = threading.Lock()
