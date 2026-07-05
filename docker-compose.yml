@@ -4,4 +4,10 @@ services:
     image: webrtc-relay
     container_name: webrtc-relay
     network_mode: host
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN}
+      SSL_CERT_PATH: ${SSL_CERT_PATH:-/etc/letsencrypt/live/${SITE_DOMAIN}/fullchain.pem}
+      SSL_KEY_PATH: ${SSL_KEY_PATH:-/etc/letsencrypt/live/${SITE_DOMAIN}/privkey.pem}
+    volumes:
+      - ./letsencrypt:/etc/letsencrypt:ro
     restart: unless-stopped

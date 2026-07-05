@@ -64,6 +64,7 @@ HTML_PAGE = """\
         var status = document.getElementById('status');
 
         async function start() {
+            if (pc) { pc.close(); pc = null; }
             status.textContent = 'Creating offer...';
             pc = new RTCPeerConnection({
                 iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
@@ -101,6 +102,9 @@ HTML_PAGE = """\
             var answer = await resp.json();
             await pc.setRemoteDescription(new RTCSessionDescription(answer));
         }
+        window.addEventListener('beforeunload', function() {
+            if (pc) { pc.close(); pc = null; }
+        });
         start();
     </script>
 </body>
