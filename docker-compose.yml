@@ -5,6 +5,7 @@ services:
     container_name: webrtc-relay
     network_mode: host
     environment:
+      TZ: Europe/Moscow
       SITE_DOMAIN: ${SITE_DOMAIN}
       SSL_CERT_PATH: ${SSL_CERT_PATH:-/etc/letsencrypt/live/${SITE_DOMAIN}/fullchain.pem}
       SSL_KEY_PATH: ${SSL_KEY_PATH:-/etc/letsencrypt/live/${SITE_DOMAIN}/privkey.pem}

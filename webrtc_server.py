@@ -6,24 +6,42 @@ import asyncio
 import base64
 from collections import deque
 import fractions
-import logging
 import os
 import socket
 import struct
+import sys
 import threading
 import time
+
 from contextlib import asynccontextmanager
+
+from logging import Handler, basicConfig
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from loguru import logger
 import uvicorn
 import av
 
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from aiortc.contrib.media import MediaRelay
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger.remove()
+logger.add(
+    sys.stderr,
+    format="{time:HH:mm:ss.SSS} | {level:<7} | {message}",
+    level="INFO",
+)
+
+class InterceptHandler(Handler):
+    def emit(self, record):
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
 DEQUE_MAXLEN = 20
 
@@ -62,13 +80,12 @@ HTML_PAGE = """\
         var pc = null;
         var video = document.getElementById('video');
         var status = document.getElementById('status');
+        var clientIP = "/*CLIENT_IP*/";
 
         async function start() {
             if (pc) { pc.close(); pc = null; }
             status.textContent = 'Creating offer...';
-            pc = new RTCPeerConnection({
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-            });
+            pc = new RTCPeerConnection();
 
             pc.ontrack = function(ev) {
                 if (ev.track.kind === 'video') {
@@ -92,6 +109,7 @@ HTML_PAGE = """\
             };
 
             var offer = await pc.createOffer({ offerToReceiveVideo: true });
+            offer.sdp = offer.sdp.replace(/\\S+\\.local/g, clientIP);
             await pc.setLocalDescription(offer);
 
             var resp = await fetch('/offer', {
@@ -478,8 +496,8 @@ app = FastAPI(title="VPS Desktop Stream — WebRTC", lifespan=lifespan)
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index():
-    return HTML_PAGE
+async def index(request: Request):
+    return HTML_PAGE.replace("/*CLIENT_IP*/", request.client.host)
 
 
 @app.post("/offer")
@@ -504,6 +522,14 @@ async def offer(request: Request):
     await pc.setLocalDescription(answer)
 
     sdp = pc.localDescription.sdp
+    lines = sdp.split("\r\n")
+
+    # Keep only the host candidate matching the IP the browser connected to
+    server_ip = request.scope.get("server", [None])[0]
+    if server_ip and server_ip != "0.0.0.0":
+        lines = [l for l in lines if not l.startswith("a=candidate") or f" {server_ip} " in l]
+
+    sdp = "\r\n".join(lines)
 
     # Inject sprop-parameter-sets into answer SDP so the browser can decode
     # without waiting for an in-band IDR (critical for b_intra_refresh mode)
@@ -535,4 +561,4 @@ if __name__ == "__main__":
         ssl_kwargs["ssl_certfile"] = ssl_certfile
         ssl_kwargs["ssl_keyfile"] = ssl_keyfile
         logger.info("SSL enabled: cert=%s", ssl_certfile)
-    uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT, **ssl_kwargs)
+    uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT, log_config=None, **ssl_kwargs)
