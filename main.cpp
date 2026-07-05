@@ -73,6 +73,7 @@ public:
     ~RtspClient() { Disconnect(); }
 
     bool HandshakeDone() const { return handshake_done_; }
+    void SetUdpMode(bool on) { udp_mode_ = on; }
 
     bool Connect(const std::string &host, int port)
     {
@@ -94,6 +95,10 @@ public:
             return false;
         }
 
+        // Save server address for UDP target
+        udp_target_ = addr;
+        udp_target_.sin_port = 0;
+
         int one = 1;
         setsockopt(sock_, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
         return true;
@@ -102,6 +107,11 @@ public:
     void Disconnect()
     {
         handshake_done_ = false;
+        if (rtp_sock_ != INVALID_SOCKET)
+        {
+            closesocket(rtp_sock_);
+            rtp_sock_ = INVALID_SOCKET;
+        }
         if (sock_ != INVALID_SOCKET)
         {
             closesocket(sock_);
@@ -120,9 +130,36 @@ public:
         if (!recv_resp()) return false;
 
         // SETUP
-        send_req("SETUP rtsp://relay/stream/trackID=0 RTSP/1.0\r\n"
-                 "CSeq: 3\r\nTransport: RTP/AVP/TCP;interleaved=0-1\r\n\r\n");
-        if (!recv_resp()) return false;
+        if (udp_mode_)
+        {
+            if (!SetupUdpSocket())
+            {
+                std::cout << "UDP: failed to bind socket" << std::endl;
+                return false;
+            }
+            char setup_req[256];
+            snprintf(setup_req, sizeof(setup_req),
+                "SETUP rtsp://relay/stream/trackID=0 RTSP/1.0\r\n"
+                "CSeq: 3\r\nTransport: RTP/AVP/UDP;unicast;client_port=%d-%d\r\n\r\n",
+                local_rtp_port_, local_rtp_port_ + 1);
+            send_req(setup_req);
+        }
+        else
+        {
+            send_req("SETUP rtsp://relay/stream/trackID=0 RTSP/1.0\r\n"
+                     "CSeq: 3\r\nTransport: RTP/AVP/TCP;interleaved=0-1\r\n\r\n");
+        }
+        if (!recv_resp())
+        {
+            if (udp_mode_)
+                std::cout << "UDP: SETUP failed (server may not support UDP transport)" << std::endl;
+            return false;
+        }
+        if (udp_mode_ && !ParseUdpTransport())
+        {
+            std::cout << "UDP: failed to parse server_port from SETUP response" << std::endl;
+            return false;
+        }
 
         // PLAY
         send_req("PLAY rtsp://relay/stream RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n");
@@ -136,6 +173,14 @@ public:
     bool SendRtp(const uint8_t *data, size_t size)
     {
         if (sock_ == INVALID_SOCKET) return false;
+        if (udp_mode_)
+        {
+            if (rtp_sock_ == INVALID_SOCKET || udp_target_.sin_port == 0)
+                return false;
+            int r = sendto(rtp_sock_, (const char*)data, (int)size, 0,
+                          (sockaddr*)&udp_target_, sizeof(udp_target_));
+            return r > 0;
+        }
         uint8_t header[4];
         header[0] = '$';
         header[1] = 0;                     // channel 0
@@ -185,6 +230,12 @@ private:
     bool keyframe_requested_ = false;
     char recv_buf_[4096] = {};
 
+    // UDP mode
+    bool udp_mode_ = false;
+    SOCKET rtp_sock_ = INVALID_SOCKET;
+    int local_rtp_port_ = 0;
+    sockaddr_in udp_target_{};
+
     void send_req(const std::string &req)
     {
         send(sock_, req.c_str(), (int)req.size(), 0);
@@ -198,6 +249,41 @@ private:
         // Accept any 200 OK response
         if (strstr(recv_buf_, "200 OK")) return true;
         return false;
+    }
+
+    bool SetupUdpSocket()
+    {
+        rtp_sock_ = socket(AF_INET, SOCK_DGRAM, 0);
+        if (rtp_sock_ == INVALID_SOCKET) return false;
+
+        sockaddr_in bind_addr{};
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_addr.s_addr = INADDR_ANY;
+        bind_addr.sin_port = 0;
+
+        if (bind(rtp_sock_, (sockaddr*)&bind_addr, sizeof(bind_addr)) < 0)
+        {
+            closesocket(rtp_sock_);
+            rtp_sock_ = INVALID_SOCKET;
+            return false;
+        }
+
+        sockaddr_in name;
+        socklen_t name_len = sizeof(name);
+        if (getsockname(rtp_sock_, (sockaddr*)&name, &name_len) == 0)
+            local_rtp_port_ = ntohs(name.sin_port);
+
+        return true;
+    }
+
+    bool ParseUdpTransport()
+    {
+        const char *p = strstr(recv_buf_, "server_port=");
+        if (!p) return false;
+        int port = 0;
+        if (sscanf(p, "server_port=%d", &port) < 1) return false;
+        udp_target_.sin_port = htons((uint16_t)port);
+        return udp_target_.sin_port != 0;
     }
 };
 
@@ -251,7 +337,7 @@ static void print_usage(const char *prog)
 {
     std::cout << "Usage:\n"
               << "  " << prog << "                         # RTSP server mode (local, ffplay)\n"
-              << "  " << prog << " push <vps_ip> [port]    # Push to VPS (TCP, default " << 8554 << ")\n";
+              << "  " << prog << " push <vps_ip> [port] [udp]    # Push to VPS (default " << 8554 << ", tcp)\n";
 }
 
 int main(int argc, char *argv[])
@@ -262,6 +348,7 @@ int main(int argc, char *argv[])
     // Server's frame queue size (webrtc_server.py: deque maxlen) = 20
 
     bool push_mode = false;
+    bool udp_mode = false;
     std::string vps_host;
     int vps_port = 8554;
 
@@ -273,7 +360,16 @@ int main(int argc, char *argv[])
             push_mode = true;
             vps_host = argv[2];
             if (argc > 3)
-                vps_port = std::atoi(argv[3]);
+            {
+                if (strcmp(argv[3], "udp") == 0)
+                    udp_mode = true;
+                else
+                {
+                    vps_port = std::atoi(argv[3]);
+                    if (argc > 4 && strcmp(argv[4], "udp") == 0)
+                        udp_mode = true;
+                }
+            }
         }
         else
         {
@@ -336,7 +432,11 @@ int main(int argc, char *argv[])
 
     if (push_mode)
     {
-        std::cout << "Push mode: RTSP to " << vps_host << ":" << vps_port << std::endl;
+        rtsp_client.SetUdpMode(udp_mode);
+        if (udp_mode)
+            std::cout << "Push mode: RTSP over UDP to " << vps_host << ":" << vps_port << std::endl;
+        else
+            std::cout << "Push mode: RTSP to " << vps_host << ":" << vps_port << std::endl;
     }
     else
     {

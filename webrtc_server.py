@@ -7,6 +7,7 @@ import base64
 from collections import deque
 import fractions
 import os
+import re
 import socket
 import struct
 import sys
@@ -45,6 +46,7 @@ class InterceptHandler(Handler):
 basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
 DEQUE_MAXLEN = 20
+RELAY_QUEUE_MAXLEN = 10    # очередь MediaRelay (тюнинг: плавность vs задержка)
 
 RTSP_PORT = int(os.environ.get("RTSP_PORT", "8554"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8001"))
@@ -343,12 +345,15 @@ class AgentSession:
 
     def __init__(self, conn, addr, keyframe_cb=None):
         self._conn = conn
+        self._conn.settimeout(1.0)
         self._addr = addr
         self._buf = b""
         self._running = True
         self._parser = RtpParser()
         self._play_sent = False
         self._keyframe_cb = keyframe_cb
+        self._udp_mode = False
+        self._rtp_sock = None
 
     def request_keyframe(self):
         """Called when browser requests PLI/FIR — forward to agent."""
@@ -357,8 +362,24 @@ class AgentSession:
         except Exception:
             pass
 
+    def _udp_recv_loop(self):
+        while self._running:
+            try:
+                data, addr = self._rtp_sock.recvfrom(65536)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            if self._play_sent:
+                self._parser.feed_rtp(data)
+
     def close(self):
         self._running = False
+        if self._rtp_sock:
+            try:
+                self._rtp_sock.close()
+            except Exception:
+                pass
         try:
             self._conn.close()
         except Exception:
@@ -371,6 +392,8 @@ class AgentSession:
         while self._running:
             try:
                 data = self._conn.recv(65536)
+            except socket.timeout:
+                continue
             except Exception:
                 break
             if not data:
@@ -430,10 +453,32 @@ class AgentSession:
                             f"Content-Length: {len(sdp)}\r\n\r\n{sdp}"
                         )
                     elif method == 'SETUP':
+                        transport = "RTP/AVP/TCP;interleaved=0-1"
+                        transport_error = None
+                        for line in lines[1:]:
+                            if line.lower().startswith('transport:'):
+                                transport_header = line.split(':', 1)[1].strip()
+                                if 'RTP/AVP/UDP' in transport_header:
+                                    m = re.search(r'client_port=(\d+)-(\d+)', transport_header)
+                                    if not m:
+                                        transport_error = "461 Unsupported Transport"
+                                    else:
+                                        rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                                        rtp_sock.bind(('0.0.0.0', 0))
+                                        rtp_sock.settimeout(1.0)
+                                        server_port = rtp_sock.getsockname()[1]
+                                        self._rtp_sock = rtp_sock
+                                        self._udp_mode = True
+                                        transport = f"RTP/AVP/UDP;unicast;client_port={m.group(1)}-{m.group(2)};server_port={server_port}-{server_port+1}"
+                                        threading.Thread(target=self._udp_recv_loop, daemon=True).start()
+                                break
+                        if transport_error:
+                            self._send(f"RTSP/1.0 {transport_error}\r\nCSeq: {cseq}\r\n\r\n")
+                            continue
                         self._send(
                             f"RTSP/1.0 200 OK\r\n"
                             f"CSeq: {cseq}\r\n"
-                            f"Transport: RTP/AVP/TCP;interleaved=0-1\r\n"
+                            f"Transport: {transport}\r\n"
                             f"Session: {session_id}\r\n\r\n"
                         )
                     elif method == 'PLAY':
@@ -564,7 +609,7 @@ async def offer(request: Request):
 
     if source_track:
         track = relay.subscribe(source_track)
-        track._queue = DroppingQueue(maxlen=3)
+        track._queue = DroppingQueue(maxlen=RELAY_QUEUE_MAXLEN)
         pc.addTrack(track)
     else:
         return JSONResponse(status_code=503, content={"error": "No source track available"})
