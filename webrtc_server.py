@@ -524,4 +524,11 @@ async def health():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT)
+    ssl_certfile = os.environ.get("SSL_CERT_PATH")
+    ssl_keyfile = os.environ.get("SSL_KEY_PATH")
+    ssl_kwargs = {}
+    if ssl_certfile and ssl_keyfile and os.path.exists(ssl_certfile) and os.path.exists(ssl_keyfile):
+        ssl_kwargs["ssl_certfile"] = ssl_certfile
+        ssl_kwargs["ssl_keyfile"] = ssl_keyfile
+        logger.info("SSL enabled: cert=%s", ssl_certfile)
+    uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT, **ssl_kwargs)

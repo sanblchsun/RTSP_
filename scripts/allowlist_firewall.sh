@@ -78,13 +78,9 @@ if command_exists iptables; then
   sudo iptables-save > "$BACKUP" || true
   echo "Saved existing iptables rules to $BACKUP"
 
-  echo "Flushing user rules and setting base policy..."
+  echo "Flushing filter rules, preserving nat/mangle tables (needed by Docker)..."
   sudo iptables -F
   sudo iptables -X
-  sudo iptables -t nat -F
-  sudo iptables -t nat -X
-  sudo iptables -t mangle -F
-  sudo iptables -t mangle -X
 
   # Default deny incoming, allow established and loopback
   sudo iptables -P INPUT DROP
