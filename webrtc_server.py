@@ -23,7 +23,8 @@ from loguru import logger
 import uvicorn
 import av
 
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc import RTCPeerConnection, RTCConfiguration, RTCSessionDescription, VideoStreamTrack
+from aiortc.rtcdtlstransport import RTCCertificate
 from aiortc.contrib.media import MediaRelay
 
 logger.remove()
@@ -56,6 +57,9 @@ _sps_data = None
 _pps_data = None
 _sps_pps_lock = threading.Lock()
 
+# Cached DTLS certificate (avoids ~5s generation per RTCPeerConnection)
+_ssl_cert = None
+
 # Reference to the current active agent session (for keyframe forwarding)
 _agent_session = None
 _agent_lock = threading.Lock()
@@ -82,45 +86,68 @@ HTML_PAGE = """\
         var status = document.getElementById('status');
         var clientIP = "/*CLIENT_IP*/";
 
+        // Pre-generate certificate on page load to avoid 5-second createOffer delay
+        var certPromise;
+        try {
+            certPromise = RTCPeerConnection.generateCertificate({ name: "ECDSA", namedCurve: "P-256" });
+        } catch(e) {
+            certPromise = null;
+        }
+
+        function injectIP(sdp, ip) {
+            sdp = sdp.replace(/^(c=IN IP4 )\\S+/m, "$1" + ip);
+            sdp = sdp.replace(/^(o=- .* IN IP4 )\\S+/m, "$1" + ip);
+            sdp = sdp.replace(/\\S+\\.local/g, ip);
+            return sdp;
+        }
+
         async function start() {
             if (pc) { pc.close(); pc = null; }
-            status.textContent = 'Creating offer...';
-            pc = new RTCPeerConnection();
+            status.textContent = "Creating offer...";
+
+            var t0 = performance.now();
+            var cert = certPromise ? await certPromise : null;
+            var t1 = performance.now();
+            pc = new RTCPeerConnection(cert ? { certificates: [cert] } : {});
+            var t2 = performance.now();
 
             pc.ontrack = function(ev) {
-                if (ev.track.kind === 'video') {
+                if (ev.track.kind === "video") {
                     video.srcObject = ev.streams[0];
-                    status.textContent = 'Connected';
+                    status.textContent = "Connected";
                 }
             };
 
             pc.oniceconnectionstatechange = function() {
                 var s = pc.iceConnectionState;
                 status.textContent = s;
-                if (s === 'failed' || s === 'disconnected') {
+                if (s === "failed" || s === "disconnected") {
                     setTimeout(start, 2000);
                 }
             };
 
             pc.onconnectionstatechange = function() {
-                if (pc.connectionState === 'closed') {
+                if (pc.connectionState === "closed") {
                     setTimeout(start, 2000);
                 }
             };
 
             var offer = await pc.createOffer({ offerToReceiveVideo: true });
-            offer.sdp = offer.sdp.replace(/\\S+\\.local/g, clientIP);
+            var t3 = performance.now();
+            offer.sdp = injectIP(offer.sdp, clientIP);
             await pc.setLocalDescription(offer);
+            var sdp = pc.localDescription.sdp;
+            sdp = sdp.replace(/\\S+\\.local/g, clientIP);
 
-            var resp = await fetch('/offer', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type })
+            var resp = await fetch("/offer", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ sdp: sdp, type: pc.localDescription.type, _timing: { cert: t1-t0, newPC: t2-t1, createOffer: t3-t2, total: performance.now()-t0 } })
             });
             var answer = await resp.json();
             await pc.setRemoteDescription(new RTCSessionDescription(answer));
         }
-        window.addEventListener('beforeunload', function() {
+        window.addEventListener("beforeunload", function() {
             if (pc) { pc.close(); pc = null; }
         });
         start();
@@ -472,7 +499,7 @@ class RtspServer:
 
 @asynccontextmanager
 async def lifespan(app):
-    global source_track
+    global _ssl_cert, source_track
     loop = asyncio.get_running_loop()
     source_track = H264StreamTrack(loop)
 
@@ -483,6 +510,12 @@ async def lifespan(app):
                 _agent_session.request_keyframe()
 
     source_track.on_request_keyframe(on_keyframe_request)
+
+    # Pre-generate DTLS certificate (~5s) so that each RTCPeerConnection()
+    # reuses it instead of generating a new one (saves 5s per connection).
+    _ssl_cert = await loop.run_in_executor(None, RTCCertificate.generateCertificate)
+    RTCCertificate.generateCertificate = classmethod(lambda cls: _ssl_cert)
+    logger.info("SSL certificate pre-generated and cached")
 
     rtsp = RtspServer()
     threading.Thread(target=rtsp.run, daemon=True).start()
@@ -503,9 +536,14 @@ async def index(request: Request):
 @app.post("/offer")
 async def offer(request: Request):
     data = await request.json()
+    timing = data.pop("_timing", None)
+    if timing:
+        logger.info("Timing: cert={}ms newPC={}ms createOffer={}ms total={}ms",
+            int(timing.get("cert", 0)), int(timing.get("newPC", 0)),
+            int(timing.get("createOffer", 0)), int(timing.get("total", 0)))
     offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
 
-    pc = RTCPeerConnection()
+    pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
 
     if source_track:
         pc.addTrack(relay.subscribe(source_track))
