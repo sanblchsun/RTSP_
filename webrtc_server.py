@@ -52,6 +52,21 @@ HTTP_PORT = int(os.environ.get("HTTP_PORT", "8001"))
 relay = MediaRelay()
 source_track = None
 
+class DroppingQueue:
+    """Bounded queue that drops oldest frame when full (replaces unbounded asyncio.Queue in MediaRelay)."""
+    __slots__ = ('_deque', '_event')
+    def __init__(self, maxlen=3):
+        self._deque = deque(maxlen=maxlen)
+        self._event = asyncio.Event()
+    def put_nowait(self, item):
+        self._deque.append(item)
+        self._event.set()
+    async def get(self):
+        while not self._deque:
+            self._event.clear()
+            await self._event.wait()
+        return self._deque.popleft()
+
 # SPS/PPS extracted from the agent's H.264 stream, used for WebRTC signalling
 _sps_data = None
 _pps_data = None
@@ -221,11 +236,13 @@ class H264StreamTrack(VideoStreamTrack):
         frame = self._deque.popleft()
 
         if self._last_pts is not None:
-            pts_delta = (frame.pts - self._last_pts) / 90000
-            if pts_delta < 0:
-                pts_delta += (1 << 32) / 90000
+            pts_delta = frame.pts - self._last_pts
+            if pts_delta < -0x7FFFFFFF:
+                pts_delta += 1 << 32
+            elif pts_delta < 0:
+                pts_delta = 0
             elapsed = time.monotonic() - self._last_time
-            wait = pts_delta - elapsed
+            wait = (pts_delta / 90000) - elapsed
             if wait > 0.002:
                 await asyncio.sleep(wait)
 
@@ -546,7 +563,9 @@ async def offer(request: Request):
     pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
 
     if source_track:
-        pc.addTrack(relay.subscribe(source_track))
+        track = relay.subscribe(source_track)
+        track._queue = DroppingQueue(maxlen=3)
+        pc.addTrack(track)
     else:
         return JSONResponse(status_code=503, content={"error": "No source track available"})
 
