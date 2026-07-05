@@ -1,5 +1,5 @@
 @echo off
-chcp 65001 >nul 2>&1
+REM chcp 65001 >nul 2>&1  REM GNU Make 3.81 несовместим с UTF-8 кодировкой консоли
 setlocal enabledelayedexpansion
 
 REM ============================================================
