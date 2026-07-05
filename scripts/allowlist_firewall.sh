@@ -78,31 +78,28 @@ if command_exists iptables; then
   sudo iptables-save > "$BACKUP" || true
   echo "Saved existing iptables rules to $BACKUP"
 
-  echo "Flushing filter rules, preserving nat/mangle tables (needed by Docker)..."
-  sudo iptables -F
-  sudo iptables -X
+  # Do NOT flush filter chains — preserves Docker's DOCKER/DOCKER-USER/FORWARD chains
+  # Do NOT change FORWARD policy — Docker needs it for container networking
 
-  # Default deny incoming, allow established and loopback
+  # Default deny incoming on host, allow outgoing
   sudo iptables -P INPUT DROP
-  sudo iptables -P FORWARD DROP
   sudo iptables -P OUTPUT ACCEPT
 
-  sudo iptables -A INPUT -i lo -j ACCEPT
-  sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  # Insert allow rules at top of INPUT (so they precede any existing Docker rules)
+  sudo iptables -I INPUT -i lo -j ACCEPT
+  sudo iptables -I INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
   for ip in "${IPS[@]}"; do
     for p in "${PORTS[@]}"; do
       echo "Allowing $ip -> port $p/tcp"
-      sudo iptables -A INPUT -p tcp -s "$ip" --dport "$p" -m conntrack --ctstate NEW -j ACCEPT
+      sudo iptables -I INPUT -p tcp -s "$ip" --dport "$p" -j ACCEPT
     done
     echo "Allowing $ip -> ports ${UDP_PORTS}/udp (WebRTC ICE/media)"
-    sudo iptables -A INPUT -p udp -s "$ip" --dport "${UDP_PORTS}" -m conntrack --ctstate NEW -j ACCEPT
+    sudo iptables -I INPUT -p udp -s "$ip" --dport "${UDP_PORTS}" -j ACCEPT
   done
 
   # Optional: allow ICMP (ping)
-  sudo iptables -A INPUT -p icmp -j ACCEPT
-
-  # Drop remaining attempts to those ports from other IPs (already dropped by default policy)
+  sudo iptables -I INPUT -p icmp -j ACCEPT
 
   # Persist rules if iptables-persistent is available
   if command_exists netfilter-persistent || command_exists iptables-save; then
