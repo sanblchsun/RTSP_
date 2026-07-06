@@ -534,7 +534,7 @@ int main(int argc, char *argv[])
                         break;
                     }
                     if (udp_mode && i + 1 < npkts)
-                        std::this_thread::sleep_for(std::chrono::microseconds(2000));
+                        std::this_thread::sleep_for(std::chrono::microseconds(500));
                 }
             }
         }
