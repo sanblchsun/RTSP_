@@ -7,6 +7,7 @@ import base64
 from collections import deque
 import fractions
 import os
+import queue
 import socket
 import struct
 import sys
@@ -44,7 +45,7 @@ class InterceptHandler(Handler):
 
 basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
-DEQUE_MAXLEN = 20
+DEQUE_MAXLEN = 35
 RELAY_QUEUE_MAXLEN = 10    # очередь MediaRelay (тюнинг: плавность vs задержка)
 
 RTSP_PORT = int(os.environ.get("RTSP_PORT", "8554"))
@@ -182,13 +183,35 @@ class H264StreamTrack(VideoStreamTrack):
         self._deque = deque(maxlen=DEQUE_MAXLEN)
         self._has_frames = asyncio.Event()
         self._running = True
-        self._decode_lock = threading.Lock()
         self._codec = av.CodecContext.create('h264', 'r')
         self._codec.thread_count = 1
         self._request_keyframe_cb = None
-        self._last_pts = None
-        self._last_time = 0.0
+        self._first_pts = None
+        self._first_time = 0.0
         self._maxlen = DEQUE_MAXLEN
+        self._decode_queue = queue.Queue(maxsize=30)
+        self._decode_thread = threading.Thread(target=self._decode_loop, daemon=True)
+        self._decode_thread.start()
+
+    def _decode_loop(self):
+        while self._running:
+            try:
+                item = self._decode_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            nal_data, rtp_timestamp = item
+            try:
+                for packet in self._codec.parse(nal_data):
+                    for frame in self._codec.decode(packet):
+                        if frame.width is None or frame.height is None:
+                            continue
+                        frame.pts = rtp_timestamp
+                        frame.time_base = fractions.Fraction(1, 90000)
+                        self._loop.call_soon_threadsafe(self._put, frame)
+            except Exception as e:
+                logger.warning("Decode error: {}", e)
 
     def on_request_keyframe(self, cb):
         self._request_keyframe_cb = cb
@@ -200,6 +223,10 @@ class H264StreamTrack(VideoStreamTrack):
 
     def stop(self):
         self._running = False
+        try:
+            self._decode_queue.put_nowait(None)
+        except queue.Full:
+            pass
 
     def feed_nal(self, nal_data: bytes, rtp_timestamp: int):
         if not self._running:
@@ -214,17 +241,10 @@ class H264StreamTrack(VideoStreamTrack):
                     _sps_data = bytes(nal_unit)
                 elif nal_type == 8:
                     _pps_data = bytes(nal_unit)
-        with self._decode_lock:
-            try:
-                for packet in self._codec.parse(nal_data):
-                    for frame in self._codec.decode(packet):
-                        if frame.width is None or frame.height is None:
-                            continue
-                        frame.pts = rtp_timestamp
-                        frame.time_base = fractions.Fraction(1, 90000)
-                        self._loop.call_soon_threadsafe(self._put, frame)
-            except Exception as e:
-                logger.warning("Decode error: {}", e)
+        try:
+            self._decode_queue.put_nowait((nal_data, rtp_timestamp))
+        except queue.Full:
+            logger.warning("Decode queue full, dropping NAL")
 
     def _put(self, frame):
         self._deque.append(frame)
@@ -236,19 +256,22 @@ class H264StreamTrack(VideoStreamTrack):
             await self._has_frames.wait()
         frame = self._deque.popleft()
 
-        if self._last_pts is not None:
-            pts_delta = frame.pts - self._last_pts
-            if pts_delta < -0x7FFFFFFF:
-                pts_delta += 1 << 32
-            elif pts_delta < 0:
-                pts_delta = 0
-            elapsed = time.monotonic() - self._last_time
-            wait = (pts_delta / 90000) - elapsed
-            if wait > 0.002:
-                await asyncio.sleep(wait)
+        if self._first_pts is None:
+            self._first_pts = frame.pts
+            self._first_time = time.monotonic()
 
-        self._last_pts = frame.pts
-        self._last_time = time.monotonic()
+        pts_offset = frame.pts - self._first_pts
+        if pts_offset < 0:
+            pts_offset += 1 << 32
+
+        expected_time = self._first_time + pts_offset / 90000
+        now = time.monotonic()
+        wait = expected_time - now
+        if wait > 0.002:
+            await asyncio.sleep(wait)
+        elif wait < -0.5:
+            return await self.recv()
+
         return frame
 
 

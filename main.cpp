@@ -432,9 +432,16 @@ int main(int argc, char *argv[])
         frame_count++;
 
         next_frame += frame_duration;
+        {
+            auto now = std::chrono::steady_clock::now();
+            if (next_frame < now)
+            {
+                auto lag = std::chrono::duration_cast<std::chrono::milliseconds>(now - next_frame);
+                if (lag.count() > 500)
+                    next_frame = now;
+            }
+        }
         std::this_thread::sleep_until(next_frame);
-        if (next_frame < std::chrono::steady_clock::now())
-            next_frame = std::chrono::steady_clock::now();
 
         if (frame_count % 30 == 0)
         {
