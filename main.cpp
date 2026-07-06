@@ -522,14 +522,19 @@ int main(int argc, char *argv[])
                 rtsp_client.ClearKeyframeFlag();
             }
 
-            for (const auto &pkt : rtp_packets)
             {
-                if (!rtsp_client.SendRtp(pkt.data(), pkt.size()))
+                size_t npkts = rtp_packets.size();
+                for (size_t i = 0; i < npkts; i++)
                 {
-                    std::cout << "VPS disconnected, reconnecting..." << std::endl;
-                    rtsp_client.Disconnect();
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                    break;
+                    if (!rtsp_client.SendRtp(rtp_packets[i].data(), rtp_packets[i].size()))
+                    {
+                        std::cout << "VPS disconnected, reconnecting..." << std::endl;
+                        rtsp_client.Disconnect();
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        break;
+                    }
+                    if (udp_mode && i + 1 < npkts)
+                        std::this_thread::sleep_for(std::chrono::microseconds(2000));
                 }
             }
         }

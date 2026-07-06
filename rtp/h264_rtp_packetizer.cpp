@@ -85,6 +85,14 @@ void H264RtpPacketizer::Packetize(
         else
             PacketizeFuA(nal, nalu_size, timestamp, out_packets);
     }
+
+    // Marker bit only on the very last RTP packet of the frame
+    if (!out_packets.empty())
+    {
+        for (size_t i = 0; i < out_packets.size() - 1; i++)
+            out_packets[i][1] &= 0x7F;
+        out_packets.back()[1] |= 0x80;
+    }
 }
 
 void H264RtpPacketizer::PacketizeSingleNal(

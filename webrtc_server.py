@@ -260,7 +260,7 @@ class H264StreamTrack(VideoStreamTrack):
                         frame.time_base = fractions.Fraction(1, 90000)
                         self._loop.call_soon_threadsafe(self._put, frame)
             except Exception as e:
-                logger.warning("Decode error: %s", e)
+                logger.warning("Decode error: {}", e)
 
     def _put(self, frame):
         self._deque.append(frame)
@@ -298,6 +298,7 @@ class RtpParser:
     def __init__(self):
         self._fua_buf = None
         self._fua_ts = 0
+        self._last_seq = -1
 
     def feed_rtp(self, data: bytes):
         global source_track
@@ -309,6 +310,16 @@ class RtpParser:
             return
         if (data[1] & 0x7F) != 96:
             return
+
+        # Sequence number gap detection → reset FU-A state
+        seq = struct.unpack('>H', data[2:4])[0]
+        if self._last_seq >= 0:
+            diff = (seq - self._last_seq) & 0xFFFF
+            if diff != 1:
+                if self._fua_buf is not None:
+                    logger.warning("FU-A reset: seq gap {}→{} (lost {})", self._last_seq, seq, diff - 1)
+                    self._fua_buf = None
+        self._last_seq = seq
 
         rtp_timestamp = struct.unpack('>I', data[4:8])[0]
         payload = data[RTP_HEADER_SIZE:]
@@ -325,7 +336,7 @@ class RtpParser:
             elif nal_type <= 23:
                 source_track.feed_nal(START_CODE + payload, rtp_timestamp)
         except Exception as e:
-            logger.warning("RTP parse error: %s", e)
+            logger.warning("RTP parse error: {}", e)
 
     def _handle_fua(self, payload: bytes, rtp_timestamp: int):
         header = payload[1]
@@ -335,10 +346,12 @@ class RtpParser:
         fragment = payload[2:]
 
         if start:
-            if self._fua_buf is not None and self._fua_ts != rtp_timestamp:
-                logger.warning("FU-A drop: buf=%d prev_ts=%d cur_ts=%d",
-                               len(self._fua_buf), self._fua_ts, rtp_timestamp)
-                self._fua_buf = None
+            if self._fua_buf is not None:
+                ts_diff = (rtp_timestamp - self._fua_ts) & 0xFFFFFFFF
+                if ts_diff > 45000:
+                    logger.warning("FU-A drop: buf={} prev_ts={} cur_ts={}",
+                                   len(self._fua_buf), self._fua_ts, rtp_timestamp)
+                    self._fua_buf = None
             if self._fua_buf is None:
                 self._fua_buf = bytearray()
                 self._fua_ts = rtp_timestamp
@@ -351,6 +364,13 @@ class RtpParser:
                         source_track.feed_nal(bytes(self._fua_buf), self._fua_ts)
                     self._fua_buf = None
         elif self._fua_buf is not None:
+            # Check for stale buffer (>1 second old)
+            ts_diff = (rtp_timestamp - self._fua_ts) & 0xFFFFFFFF
+            if ts_diff > 90000:
+                logger.warning("FU-A stale: buf={} prev_ts={} cur_ts={}",
+                               len(self._fua_buf), self._fua_ts, rtp_timestamp)
+                self._fua_buf = None
+                return
             self._fua_buf.extend(fragment)
             if end:
                 try:
@@ -545,7 +565,7 @@ class AgentSession:
                 else:
                     break
 
-        logger.info("Agent disconnected: %s", self._addr[0])
+        logger.info("Agent disconnected: {}", self._addr[0])
 
     def _send(self, response: str):
         try:
@@ -573,7 +593,7 @@ class RtspServer:
                 server.bind(('0.0.0.0', RTSP_PORT))
                 server.listen(1)
                 server.settimeout(1.0)
-                logger.info("RTSP server on port %d (waiting for agent)", RTSP_PORT)
+                logger.info("RTSP server on port {} (waiting for agent)", RTSP_PORT)
 
                 while self._running:
                     try:
@@ -594,7 +614,7 @@ class RtspServer:
 
             except Exception as e:
                 if self._running:
-                    logger.error("RTSP error: %s", e)
+                    logger.error("RTSP error: {}", e)
                     time.sleep(1)
             finally:
                 if server:
@@ -628,7 +648,7 @@ async def lifespan(app):
 
     rtsp = RtspServer()
     threading.Thread(target=rtsp.run, daemon=True).start()
-    logger.info("VPS ready — RTSP on %d, WebRTC on %d", RTSP_PORT, HTTP_PORT)
+    logger.info("VPS ready — RTSP on {}, WebRTC on {}", RTSP_PORT, HTTP_PORT)
     yield
     source_track.stop()
     rtsp.stop()
@@ -709,5 +729,5 @@ if __name__ == "__main__":
     if ssl_certfile and ssl_keyfile and os.path.exists(ssl_certfile) and os.path.exists(ssl_keyfile):
         ssl_kwargs["ssl_certfile"] = ssl_certfile
         ssl_kwargs["ssl_keyfile"] = ssl_keyfile
-        logger.info("SSL enabled: cert=%s", ssl_certfile)
+        logger.info("SSL enabled: cert={}", ssl_certfile)
     uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT, log_config=None, **ssl_kwargs)
