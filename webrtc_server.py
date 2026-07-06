@@ -386,7 +386,7 @@ class AgentSession:
             pass
 
     def handle(self):
-        logger.info("Agent connected: %s", self._addr[0])
+        logger.info("Agent connected: %s:%d (TCP)", self._addr[0], self._addr[1])
         session_id = "12345678"
 
         while self._running:
@@ -481,6 +481,7 @@ class AgentSession:
                                             self._rtp_sock = rtp_sock
                                             self._udp_mode = True
                                             transport = f"RTP/AVP/UDP;unicast;client_port={m.group(1)}-{m.group(2)};server_port={server_port}-{server_port+1}"
+                                            logger.info("UDP: RTP socket bound to port %d (client_port=%s-%s)", server_port, m.group(1), m.group(2))
                                             threading.Thread(target=self._udp_recv_loop, daemon=True).start()
                                 break
                         if transport_error:

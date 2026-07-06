@@ -99,6 +99,7 @@ public:
         udp_target_ = addr;
         udp_target_.sin_port = 0;
 
+        std::cout << "TCP: connected to " << host << ":" << port << " (RTSP control)" << std::endl;
         int one = 1;
         setsockopt(sock_, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one));
         return true;
@@ -160,13 +161,18 @@ public:
             std::cout << "UDP: failed to parse server_port from SETUP response" << std::endl;
             return false;
         }
+        if (udp_mode_)
+            std::cout << "UDP: server RTP port " << ntohs(udp_target_.sin_port) << std::endl;
 
         // PLAY
         send_req("PLAY rtsp://relay/stream RTSP/1.0\r\nCSeq: 4\r\nSession: 12345678\r\n\r\n");
         if (!recv_resp()) return false;
 
         handshake_done_ = true;
-        std::cout << "RTSP handshake OK" << std::endl;
+        if (udp_mode_)
+            std::cout << "RTSP handshake OK | RTP UDP client->server port " << ntohs(udp_target_.sin_port) << " | local UDP port " << local_rtp_port_ << std::endl;
+        else
+            std::cout << "RTSP handshake OK | RTP TCP interleaved" << std::endl;
         return true;
     }
 
@@ -269,6 +275,7 @@ private:
             if (bind(rtp_sock_, (sockaddr*)&bind_addr, sizeof(bind_addr)) == 0)
             {
                 local_rtp_port_ = port;
+                std::cout << "UDP: local RTP port bind to " << local_rtp_port_ << std::endl;
                 return true;
             }
         }
@@ -436,9 +443,7 @@ int main(int argc, char *argv[])
     {
         rtsp_client.SetUdpMode(udp_mode);
         if (udp_mode)
-            std::cout << "Push mode: RTSP over UDP to " << vps_host << ":" << vps_port << std::endl;
-        else
-            std::cout << "Push mode: RTSP to " << vps_host << ":" << vps_port << std::endl;
+            std::cout << "Push mode: RTSP " << (udp_mode ? "UDP" : "TCP") << " to " << vps_host << ":" << vps_port << std::endl;
     }
     else
     {
