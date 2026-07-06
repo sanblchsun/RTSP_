@@ -279,12 +279,12 @@ class H264StreamTrack(VideoStreamTrack):
 
             if wait > 0.001:
                 await asyncio.sleep(wait)
-                return frame
-            elif wait < -0.3:
-                logger.warning("Dropping frame {:.0f}ms late", -wait * 1000)
-                continue
-            else:
-                return frame
+            elif wait < -0.5:
+                logger.warning("Timeline snap: {:.0f}ms behind", -wait * 1000)
+                self._first_pts = frame.pts
+                self._first_time = now
+
+            return frame
 
 
 RTP_HEADER_SIZE = 12
