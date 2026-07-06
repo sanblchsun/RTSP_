@@ -62,10 +62,11 @@ if errorlevel 1 (
 )
 
 echo [BUILD] Cleaning previous build...
-make clean 2>nul
+make SHELL=cmd.exe clean 2>nul
 
 echo [BUILD] Compiling libx264 (this may take a few minutes)...
-make lib-static
+del /f libx264.lib 2>nul
+make SHELL=cmd.exe lib-static
 if errorlevel 1 (
     echo [BUILD] libx264 build FAILED!
     exit /b 1
