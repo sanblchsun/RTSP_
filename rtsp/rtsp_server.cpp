@@ -313,41 +313,11 @@ std::string RtspServer::HandleSetup(const std::string &req)
             cseq = cseq.substr(1);
     }
 
-    // Parse transport: prefer TCP interleaved
-    size_t transport_pos = req.find("Transport:");
-    std::string transport = "RTP/AVP/TCP;interleaved=0-1";
-    if (transport_pos != std::string::npos)
-    {
-        size_t end = req.find("\r\n", transport_pos);
-        std::string client_transport = req.substr(transport_pos + 10, end - transport_pos - 10);
-        // Trim
-        while (!client_transport.empty() && (client_transport[0] == ' ' || client_transport[0] == '\t'))
-            client_transport = client_transport.substr(1);
-
-        if (client_transport.find("RTP/AVP/TCP") != std::string::npos)
-        {
-            // Use interleaved mode
-            size_t interleaved_pos = client_transport.find("interleaved=");
-            if (interleaved_pos != std::string::npos)
-            {
-                transport = client_transport; // echo back client's transport
-            }
-            else
-            {
-                transport = "RTP/AVP/TCP;interleaved=0-1";
-            }
-        }
-        else
-        {
-            transport = "RTP/AVP/TCP;interleaved=0-1";
-        }
-    }
-
     std::string session_id = "12345678";
     std::ostringstream resp;
     resp << "RTSP/1.0 200 OK\r\n"
          << "CSeq: " << cseq << "\r\n"
-         << "Transport: " << transport << "\r\n"
+         << "Transport: RTP/AVP/TCP;interleaved=0-1\r\n"
          << "Session: " << session_id << "\r\n"
          << "\r\n";
     return resp.str();
