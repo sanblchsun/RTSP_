@@ -189,14 +189,29 @@ class H264StreamTrack(VideoStreamTrack):
         self._first_pts = None
         self._first_time = 0.0
         self._maxlen = DEQUE_MAXLEN
-        self._decode_queue = queue.Queue(maxsize=30)
+        self._decode_queue = queue.Queue(maxsize=60)
+        self._decode_overflow = False
         self._decode_thread = threading.Thread(target=self._decode_loop, daemon=True)
         self._decode_thread.start()
 
     def _decode_loop(self):
         while self._running:
+            if self._decode_overflow:
+                self._decode_overflow = False
+                drained = 0
+                while self._running:
+                    try:
+                        self._decode_queue.get_nowait()
+                        drained += 1
+                    except queue.Empty:
+                        break
+                self._codec = av.CodecContext.create('h264', 'r')
+                self._codec.thread_count = 1
+                logger.warning("Decode overflow: drained {} NALs, requesting keyframe", drained)
+                self._loop.call_soon_threadsafe(self._request_keyframe)
+                continue
             try:
-                item = self._decode_queue.get(timeout=1.0)
+                item = self._decode_queue.get(timeout=0.05)
             except queue.Empty:
                 continue
             if item is None:
@@ -244,7 +259,7 @@ class H264StreamTrack(VideoStreamTrack):
         try:
             self._decode_queue.put_nowait((nal_data, rtp_timestamp))
         except queue.Full:
-            logger.warning("Decode queue full, dropping NAL")
+            self._decode_overflow = True
 
     def _put(self, frame):
         self._deque.append(frame)
