@@ -337,11 +337,6 @@ std::string RtspServer::HandleSetup(const std::string &req)
                 transport = "RTP/AVP/TCP;interleaved=0-1";
             }
         }
-        else if (client_transport.find("RTP/AVP/UDP") != std::string::npos)
-        {
-            // Extract client ports for UDP
-            transport = client_transport;
-        }
         else
         {
             transport = "RTP/AVP/TCP;interleaved=0-1";

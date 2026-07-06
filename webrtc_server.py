@@ -7,7 +7,6 @@ import base64
 from collections import deque
 import fractions
 import os
-import re
 import socket
 import struct
 import sys
@@ -27,41 +26,6 @@ import av
 from aiortc import RTCPeerConnection, RTCConfiguration, RTCSessionDescription, VideoStreamTrack
 from aiortc.rtcdtlstransport import RTCCertificate
 from aiortc.contrib.media import MediaRelay
-
-# ---- UDP port ranges (must match scripts/allowlist_firewall.sh) ----
-RTP_UDP_MIN = 49152
-RTP_UDP_MAX = 50000     # RTP/RTCP media from agent (до 849 агентов)
-ICE_UDP_MIN = 50001
-ICE_UDP_MAX = 51000     # WebRTC ICE candidates (до 1000 браузеров)
-
-# ---- Patch aioice ICE to restrict UDP ephemeral ports ----
-import aioice.ice as _aioice_ice
-
-_ice_get_component_candidates_orig = _aioice_ice.Connection.get_component_candidates
-
-async def _ice_get_component_candidates_patched(self, component, addresses, timeout=5):
-    loop = asyncio.get_event_loop()
-    _orig_create_dg = loop.create_datagram_endpoint
-
-    async def _wrap_create_dg(protocol_factory, *, local_addr=None, **kw):
-        if local_addr and local_addr[1] == 0:
-            for port in range(ICE_UDP_MIN, ICE_UDP_MAX + 1):
-                try:
-                    return await _orig_create_dg(
-                        protocol_factory, local_addr=(local_addr[0], port), **kw
-                    )
-                except OSError:
-                    continue
-        return await _orig_create_dg(protocol_factory, local_addr=local_addr, **kw)
-
-    loop.create_datagram_endpoint = _wrap_create_dg
-    try:
-        return await _ice_get_component_candidates_orig(self, component, addresses, timeout)
-    finally:
-        loop.create_datagram_endpoint = _orig_create_dg
-
-_aioice_ice.Connection.get_component_candidates = _ice_get_component_candidates_patched
-logger.info("UDP ranges: RTP {}-{} | ICE {}-{}", RTP_UDP_MIN, RTP_UDP_MAX, ICE_UDP_MIN, ICE_UDP_MAX)
 
 logger.remove()
 logger.add(
@@ -407,8 +371,6 @@ class AgentSession:
         self._parser = RtpParser()
         self._play_sent = False
         self._keyframe_cb = keyframe_cb
-        self._udp_mode = False
-        self._rtp_sock = None
 
     def request_keyframe(self):
         """Called when browser requests PLI/FIR — forward to agent."""
@@ -417,24 +379,8 @@ class AgentSession:
         except Exception:
             pass
 
-    def _udp_recv_loop(self):
-        while self._running:
-            try:
-                data, addr = self._rtp_sock.recvfrom(65536)
-            except socket.timeout:
-                continue
-            except Exception:
-                break
-            if self._play_sent:
-                self._parser.feed_rtp(data)
-
     def close(self):
         self._running = False
-        if self._rtp_sock:
-            try:
-                self._rtp_sock.close()
-            except Exception:
-                pass
         try:
             self._conn.close()
         except Exception:
@@ -509,39 +455,6 @@ class AgentSession:
                         )
                     elif method == 'SETUP':
                         transport = "RTP/AVP/TCP;interleaved=0-1"
-                        transport_error = None
-                        for line in lines[1:]:
-                            if line.lower().startswith('transport:'):
-                                transport_header = line.split(':', 1)[1].strip()
-                                if 'RTP/AVP/UDP' in transport_header:
-                                    m = re.search(r'client_port=(\d+)-(\d+)', transport_header)
-                                    if not m:
-                                        transport_error = "461 Unsupported Transport"
-                                    else:
-                                        rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                                        rtp_sock.settimeout(1.0)
-                                        UDP_PORT_MIN = RTP_UDP_MIN
-                                        UDP_PORT_MAX = RTP_UDP_MAX
-                                        server_port = None
-                                        for port in range(UDP_PORT_MIN, UDP_PORT_MAX + 1):
-                                            try:
-                                                rtp_sock.bind(('0.0.0.0', port))
-                                                server_port = port
-                                                break
-                                            except OSError:
-                                                continue
-                                        if server_port is None:
-                                            transport_error = "461 Unsupported Transport"
-                                        else:
-                                            self._rtp_sock = rtp_sock
-                                            self._udp_mode = True
-                                            transport = f"RTP/AVP/UDP;unicast;client_port={m.group(1)}-{m.group(2)};server_port={server_port}-{server_port+1}"
-                                            logger.info("UDP: RTP socket bound to port {} (client_port={}-{})", server_port, m.group(1), m.group(2))
-                                            threading.Thread(target=self._udp_recv_loop, daemon=True).start()
-                                break
-                        if transport_error:
-                            self._send(f"RTSP/1.0 {transport_error}\r\nCSeq: {cseq}\r\n\r\n")
-                            continue
                         self._send(
                             f"RTSP/1.0 200 OK\r\n"
                             f"CSeq: {cseq}\r\n"

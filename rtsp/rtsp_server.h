@@ -8,8 +8,7 @@
 #include <cstdint>
 
 // RTSP server for H.264 streaming
-// Supports RTP/AVP/TCP interleaved mode (works through NAT)
-// and RTP/AVP/UDP unicast mode
+// RTP/AVP/TCP interleaved mode (works through NAT)
 class RtspServer
 {
 public:

@@ -4,12 +4,11 @@ set -euo pipefail
 # allowlist_firewall.sh
 # Usage: sudo ./allowlist_firewall.sh 1.2.3.4 [5.6.7.8 ...]
 # The script will configure UFW if present, otherwise fall back to iptables.
-# It restricts incoming connections to a small set of ports (default: 22,8001,8554)
-# and UDP ranges (default: 49152:50000 RTP from agent, 50001:51000 WebRTC ICE)
+# It restricts incoming connections to a small set of TCP ports (22,8001,8554)
+# and a UDP range for WebRTC ICE (50001:51000).
 # allowing only the provided source IP addresses. Use with caution when remote.
 
 PORTS=(22 8001 8554)
-UDP_PORTS_RTP="49152:50000"
 UDP_PORTS_ICE="50001:51000"
 METADATA_FILE=/etc/allowlist_firewall.meta
 
@@ -32,8 +31,7 @@ fi
 
 echo "Allowed IPs: ${IPS[*]}"
 echo "TCP Ports: ${PORTS[*]}"
-echo "UDP RTP Range: ${UDP_PORTS_RTP}"
-echo "UDP ICE Range: ${UDP_PORTS_ICE}"
+echo "ICE UDP Range: ${UDP_PORTS_ICE}"
 
 # Safety: if running remotely, warn user about lockout
 if [ -n "${SSH_CONNECTION:-}" ]; then
@@ -57,8 +55,6 @@ if command_exists ufw; then
       echo "Allowing $ip -> port $p/tcp"
       sudo ufw allow from "$ip" to any port "$p" proto tcp
     done
-    echo "Allowing $ip -> ports ${UDP_PORTS_RTP}/udp (RTP from agent)"
-    sudo ufw allow from "$ip" to any port "${UDP_PORTS_RTP}" proto udp
     echo "Allowing $ip -> ports ${UDP_PORTS_ICE}/udp (WebRTC ICE)"
     sudo ufw allow from "$ip" to any port "${UDP_PORTS_ICE}" proto udp
   done
@@ -98,8 +94,6 @@ if command_exists iptables; then
       echo "Allowing $ip -> port $p/tcp"
       sudo iptables -I INPUT -p tcp -s "$ip" --dport "$p" -j ACCEPT
     done
-    echo "Allowing $ip -> ports ${UDP_PORTS_RTP}/udp (RTP from agent)"
-    sudo iptables -I INPUT -p udp -s "$ip" --dport "${UDP_PORTS_RTP}" -j ACCEPT
     echo "Allowing $ip -> ports ${UDP_PORTS_ICE}/udp (WebRTC ICE)"
     sudo iptables -I INPUT -p udp -s "$ip" --dport "${UDP_PORTS_ICE}" -j ACCEPT
   done
