@@ -464,13 +464,24 @@ class AgentSession:
                                         transport_error = "461 Unsupported Transport"
                                     else:
                                         rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                                        rtp_sock.bind(('0.0.0.0', 0))
                                         rtp_sock.settimeout(1.0)
-                                        server_port = rtp_sock.getsockname()[1]
-                                        self._rtp_sock = rtp_sock
-                                        self._udp_mode = True
-                                        transport = f"RTP/AVP/UDP;unicast;client_port={m.group(1)}-{m.group(2)};server_port={server_port}-{server_port+1}"
-                                        threading.Thread(target=self._udp_recv_loop, daemon=True).start()
+                                        UDP_PORT_MIN = 49152
+                                        UDP_PORT_MAX = 65535
+                                        server_port = None
+                                        for port in range(UDP_PORT_MIN, UDP_PORT_MAX + 1):
+                                            try:
+                                                rtp_sock.bind(('0.0.0.0', port))
+                                                server_port = port
+                                                break
+                                            except OSError:
+                                                continue
+                                        if server_port is None:
+                                            transport_error = "461 Unsupported Transport"
+                                        else:
+                                            self._rtp_sock = rtp_sock
+                                            self._udp_mode = True
+                                            transport = f"RTP/AVP/UDP;unicast;client_port={m.group(1)}-{m.group(2)};server_port={server_port}-{server_port+1}"
+                                            threading.Thread(target=self._udp_recv_loop, daemon=True).start()
                                 break
                         if transport_error:
                             self._send(f"RTSP/1.0 {transport_error}\r\nCSeq: {cseq}\r\n\r\n")
