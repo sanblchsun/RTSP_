@@ -192,7 +192,7 @@ bool X264Encoder::EncodeFrame(const std::vector<uint8_t> &bgra,
     x264_picture_t pic;
     x264_picture_init(&pic);
 
-    pic.i_type = X264_TYPE_AUTO;
+    pic.i_type = (m_frame_count == 0) ? X264_TYPE_IDR : X264_TYPE_AUTO;
     pic.i_pts = m_frame_count;
     pic.img.i_csp = X264_CSP_I420;
     pic.img.i_plane = 3;
