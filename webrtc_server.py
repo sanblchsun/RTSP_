@@ -7,6 +7,7 @@ import base64
 from collections import deque
 import fractions
 import os
+import queue
 import socket
 import struct
 import sys
@@ -44,8 +45,8 @@ class InterceptHandler(Handler):
 
 basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
-DEQUE_MAXLEN = 20
-RELAY_QUEUE_MAXLEN = 10    # очередь MediaRelay (тюнинг: плавность vs задержка)
+DEQUE_MAXLEN = 5
+RELAY_QUEUE_MAXLEN = 3    # очередь MediaRelay (тюнинг: плавность vs задержка)
 
 RTSP_PORT = int(os.environ.get("RTSP_PORT", "8554"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8001"))
@@ -173,6 +174,46 @@ HTML_PAGE = """\
 """
 
 
+class _DecodeThread:
+    """Decodes H.264 NALs in a background thread so TCP recv() is never blocked."""
+
+    def __init__(self, loop, put_frame_cb):
+        self._loop = loop
+        self._put_frame = put_frame_cb
+        self._queue = queue.Queue(maxsize=60)
+        self._running = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def feed(self, nal_data: bytes, rtp_timestamp: int):
+        if self._running:
+            self._queue.put((nal_data, rtp_timestamp))
+
+    def stop(self):
+        self._running = False
+        self._queue.put(None)
+        self._thread.join(timeout=2)
+
+    def _run(self):
+        codec = av.CodecContext.create('h264', 'r')
+        codec.thread_count = 0  # multi-threaded decode
+        while self._running:
+            try:
+                item = self._queue.get()
+                if item is None:
+                    break
+                nal_data, rtp_timestamp = item
+                for packet in codec.parse(nal_data):
+                    for frame in codec.decode(packet):
+                        if frame.width is None or frame.height is None:
+                            continue
+                        frame.pts = rtp_timestamp
+                        frame.time_base = fractions.Fraction(1, 90000)
+                        self._loop.call_soon_threadsafe(self._put_frame, frame)
+            except Exception as e:
+                logger.warning("Decode error: {}", e)
+
+
 class H264StreamTrack(VideoStreamTrack):
     kind = "video"
 
@@ -182,13 +223,10 @@ class H264StreamTrack(VideoStreamTrack):
         self._deque = deque(maxlen=DEQUE_MAXLEN)
         self._has_frames = asyncio.Event()
         self._running = True
-        self._decode_lock = threading.Lock()
-        self._codec = av.CodecContext.create('h264', 'r')
-        self._codec.thread_count = 1
+        self._decode_thread = _DecodeThread(loop, self._put)
         self._request_keyframe_cb = None
-        self._last_pts = None
-        self._last_time = 0.0
-        self._maxlen = DEQUE_MAXLEN
+        self._first_pts = None
+        self._first_time = 0.0
 
     def on_request_keyframe(self, cb):
         self._request_keyframe_cb = cb
@@ -200,6 +238,7 @@ class H264StreamTrack(VideoStreamTrack):
 
     def stop(self):
         self._running = False
+        self._decode_thread.stop()
 
     def feed_nal(self, nal_data: bytes, rtp_timestamp: int):
         if not self._running:
@@ -214,42 +253,38 @@ class H264StreamTrack(VideoStreamTrack):
                     _sps_data = bytes(nal_unit)
                 elif nal_type == 8:
                     _pps_data = bytes(nal_unit)
-        with self._decode_lock:
-            try:
-                for packet in self._codec.parse(nal_data):
-                    for frame in self._codec.decode(packet):
-                        if frame.width is None or frame.height is None:
-                            continue
-                        frame.pts = rtp_timestamp
-                        frame.time_base = fractions.Fraction(1, 90000)
-                        self._loop.call_soon_threadsafe(self._put, frame)
-            except Exception as e:
-                logger.warning("Decode error: {}", e)
+        # Push to decode thread (non-blocking)
+        self._decode_thread.feed(nal_data, rtp_timestamp)
 
     def _put(self, frame):
         self._deque.append(frame)
         self._has_frames.set()
 
     async def recv(self):
-        while not self._deque:
-            self._has_frames.clear()
-            await self._has_frames.wait()
-        frame = self._deque.popleft()
+        while True:
+            while not self._deque:
+                self._has_frames.clear()
+                await self._has_frames.wait()
+            frame = self._deque.popleft()
 
-        if self._last_pts is not None:
-            pts_delta = frame.pts - self._last_pts
-            if pts_delta < -0x7FFFFFFF:
-                pts_delta += 1 << 32
-            elif pts_delta < 0:
-                pts_delta = 0
-            elapsed = time.monotonic() - self._last_time
-            wait = (pts_delta / 90000) - elapsed
-            if wait > 0.002:
+            if self._first_pts is None:
+                self._first_pts = frame.pts
+                self._first_time = time.monotonic()
+                return frame
+
+            elapsed_pts = (frame.pts - self._first_pts) & 0xFFFFFFFF
+            expected_time = self._first_time + elapsed_pts / 90000.0
+            now = time.monotonic()
+            wait = expected_time - now
+
+            if wait > 0.001:
                 await asyncio.sleep(wait)
-
-        self._last_pts = frame.pts
-        self._last_time = time.monotonic()
-        return frame
+                return frame
+            elif wait < -0.3:
+                logger.warning("Dropping frame {:.0f}ms late", -wait * 1000)
+                continue
+            else:
+                return frame
 
 
 RTP_HEADER_SIZE = 12
@@ -512,6 +547,7 @@ class RtspServer:
                     try:
                         conn, addr = server.accept()
                         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                        conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
                     except socket.timeout:
                         continue
                     global _agent_session

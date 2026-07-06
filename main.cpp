@@ -375,12 +375,15 @@ int main(int argc, char *argv[])
             std::cerr << "Encode error" << std::endl;
             break;
         }
+
+        uint32_t current_rtp_ts = rtp_ts;
+        rtp_ts += rtp_ts_step;
+
         if (nals.empty())
             continue;
 
         // RTP packetize (both modes)
-        packetizer.Packetize(nals.data(), nals.size(), rtp_ts, rtp_packets);
-        rtp_ts += rtp_ts_step;
+        packetizer.Packetize(nals.data(), nals.size(), current_rtp_ts, rtp_packets);
 
         if (push_mode)
         {
@@ -432,9 +435,14 @@ int main(int argc, char *argv[])
         frame_count++;
 
         next_frame += frame_duration;
-        std::this_thread::sleep_until(next_frame);
-        if (next_frame < std::chrono::steady_clock::now())
-            next_frame = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        if (next_frame > now) {
+            std::this_thread::sleep_until(next_frame);
+        } else if (now - next_frame > std::chrono::milliseconds(500)) {
+            // Too far behind (>500ms), reset to avoid massive catch-up
+            next_frame = now;
+        }
+        // else: slightly behind, skip this frame slot (don't reset — keeps timeline)
 
         if (frame_count % 30 == 0)
         {
