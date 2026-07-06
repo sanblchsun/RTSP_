@@ -28,6 +28,41 @@ from aiortc import RTCPeerConnection, RTCConfiguration, RTCSessionDescription, V
 from aiortc.rtcdtlstransport import RTCCertificate
 from aiortc.contrib.media import MediaRelay
 
+# ---- UDP port ranges (must match scripts/allowlist_firewall.sh) ----
+RTP_UDP_MIN = 49152
+RTP_UDP_MAX = 50000     # RTP/RTCP media from agent (до 849 агентов)
+ICE_UDP_MIN = 50001
+ICE_UDP_MAX = 51000     # WebRTC ICE candidates (до 1000 браузеров)
+
+# ---- Patch aioice ICE to restrict UDP ephemeral ports ----
+import aioice.ice as _aioice_ice
+
+_ice_get_component_candidates_orig = _aioice_ice.Connection.get_component_candidates
+
+async def _ice_get_component_candidates_patched(self, component, addresses, timeout=5):
+    loop = asyncio.get_event_loop()
+    _orig_create_dg = loop.create_datagram_endpoint
+
+    async def _wrap_create_dg(protocol_factory, *, local_addr=None, **kw):
+        if local_addr and local_addr[1] == 0:
+            for port in range(ICE_UDP_MIN, ICE_UDP_MAX + 1):
+                try:
+                    return await _orig_create_dg(
+                        protocol_factory, local_addr=(local_addr[0], port), **kw
+                    )
+                except OSError:
+                    continue
+        return await _orig_create_dg(protocol_factory, local_addr=local_addr, **kw)
+
+    loop.create_datagram_endpoint = _wrap_create_dg
+    try:
+        return await _ice_get_component_candidates_orig(self, component, addresses, timeout)
+    finally:
+        loop.create_datagram_endpoint = _orig_create_dg
+
+_aioice_ice.Connection.get_component_candidates = _ice_get_component_candidates_patched
+logger.info("UDP ranges: RTP {}-{} | ICE {}-{}", RTP_UDP_MIN, RTP_UDP_MAX, ICE_UDP_MIN, ICE_UDP_MAX)
+
 logger.remove()
 logger.add(
     sys.stderr,
@@ -386,7 +421,7 @@ class AgentSession:
             pass
 
     def handle(self):
-        logger.info("Agent connected: %s:%d (TCP)", self._addr[0], self._addr[1])
+        logger.info("Agent connected: {}:{} (TCP)", self._addr[0], self._addr[1])
         session_id = "12345678"
 
         while self._running:
@@ -465,8 +500,8 @@ class AgentSession:
                                     else:
                                         rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                                         rtp_sock.settimeout(1.0)
-                                        UDP_PORT_MIN = 49152
-                                        UDP_PORT_MAX = 65535
+                                        UDP_PORT_MIN = RTP_UDP_MIN
+                                        UDP_PORT_MAX = RTP_UDP_MAX
                                         server_port = None
                                         for port in range(UDP_PORT_MIN, UDP_PORT_MAX + 1):
                                             try:
@@ -481,7 +516,7 @@ class AgentSession:
                                             self._rtp_sock = rtp_sock
                                             self._udp_mode = True
                                             transport = f"RTP/AVP/UDP;unicast;client_port={m.group(1)}-{m.group(2)};server_port={server_port}-{server_port+1}"
-                                            logger.info("UDP: RTP socket bound to port %d (client_port=%s-%s)", server_port, m.group(1), m.group(2))
+                                            logger.info("UDP: RTP socket bound to port {} (client_port={}-{})", server_port, m.group(1), m.group(2))
                                             threading.Thread(target=self._udp_recv_loop, daemon=True).start()
                                 break
                         if transport_error:

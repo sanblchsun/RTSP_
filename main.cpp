@@ -265,24 +265,22 @@ private:
         sockaddr_in bind_addr{};
         bind_addr.sin_family = AF_INET;
         bind_addr.sin_addr.s_addr = INADDR_ANY;
+        bind_addr.sin_port = 0;
 
-        const uint16_t UDP_PORT_MIN = 49152;
-        const uint16_t UDP_PORT_MAX = 65535;
-
-        for (uint16_t port = UDP_PORT_MIN; port <= UDP_PORT_MAX; ++port)
+        if (bind(rtp_sock_, (sockaddr*)&bind_addr, sizeof(bind_addr)) < 0)
         {
-            bind_addr.sin_port = htons(port);
-            if (bind(rtp_sock_, (sockaddr*)&bind_addr, sizeof(bind_addr)) == 0)
-            {
-                local_rtp_port_ = port;
-                std::cout << "UDP: local RTP port bind to " << local_rtp_port_ << std::endl;
-                return true;
-            }
+            closesocket(rtp_sock_);
+            rtp_sock_ = INVALID_SOCKET;
+            return false;
         }
 
-        closesocket(rtp_sock_);
-        rtp_sock_ = INVALID_SOCKET;
-        return false;
+        sockaddr_in name;
+        socklen_t name_len = sizeof(name);
+        if (getsockname(rtp_sock_, (sockaddr*)&name, &name_len) == 0)
+            local_rtp_port_ = ntohs(name.sin_port);
+
+        std::cout << "UDP: local RTP port " << local_rtp_port_ << std::endl;
+        return true;
     }
 
     bool ParseUdpTransport()
