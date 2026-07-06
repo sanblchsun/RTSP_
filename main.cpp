@@ -11,7 +11,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
-#include <cstdio>
+
 #include <string>
 #include <atomic>
 #include <memory>
@@ -349,7 +349,9 @@ int main(int argc, char *argv[])
     }
 
     // ---- Main loop ----
+#ifdef _WIN32
     timeBeginPeriod(1);
+#endif
     std::vector<uint8_t> bgra, nals;
     std::vector<std::vector<uint8_t>> rtp_packets;
     int fw = 0, fh = 0;
@@ -445,7 +447,9 @@ int main(int argc, char *argv[])
     rtsp_client.Disconnect();
     encoder->Shutdown();
     capture->Shutdown();
+#ifdef _WIN32
     timeEndPeriod(1);
+#endif
     std::cout << "\nDone. " << frame_count << " frames" << std::endl;
     return 0;
 }

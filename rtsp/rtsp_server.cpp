@@ -485,6 +485,19 @@ void RtspServer::SendInterleavedRtp(const uint8_t *data, size_t size)
     header[2] = (uint8_t)((size >> 8) & 0xFF);
     header[3] = (uint8_t)(size & 0xFF);
 
-    send(client_fd_, (const char *)header, 4, 0);
-    send(client_fd_, (const char *)data, (int)size, 0);
+    // Send header + data with partial-send protection
+    const uint8_t *bufs[2] = {header, data};
+    size_t lens[2] = {4, size};
+    for (int i = 0; i < 2; i++)
+    {
+        const uint8_t *p = bufs[i];
+        size_t remain = lens[i];
+        while (remain > 0)
+        {
+            int r = (int)send(client_fd_, (const char *)p, (int)remain, 0);
+            if (r <= 0) return;
+            p += r;
+            remain -= (size_t)r;
+        }
+    }
 }

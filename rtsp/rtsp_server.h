@@ -13,7 +13,6 @@ class RtspServer
 {
 public:
     using LogCallback = std::function<void(const std::string &)>;
-    using RtpDataCallback = std::function<void(uint8_t *data, size_t size)>;
 
     RtspServer();
     ~RtspServer();
@@ -69,9 +68,6 @@ private:
     std::thread accept_thread_;
     std::thread client_thread_;
     std::string client_address_;
-
-    // RTSP CSeq tracking
-    int cseq_ = 0;
 
     LogCallback log_;
 
