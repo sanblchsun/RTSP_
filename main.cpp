@@ -431,7 +431,10 @@ int main(int argc, char *argv[])
 
     // ---- Setup ----
     H264RtpPacketizer packetizer;
-    packetizer.SetMaxPayloadSize(8000);
+    if (udp_mode)
+        packetizer.SetMaxPayloadSize(1400);  // avoid IP fragmentation over UDP
+    else
+        packetizer.SetMaxPayloadSize(8000);  // TCP stream, fragmentation is fine
     packetizer.SetSsrc(0xDEADBEEF);
 
     RtspServer rtsp;
