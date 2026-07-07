@@ -207,6 +207,14 @@ class H264StreamTrack(VideoStreamTrack):
                         break
                 self._codec = av.CodecContext.create('h264', 'r')
                 self._codec.thread_count = 1
+                global _sps_data, _pps_data
+                with _sps_pps_lock:
+                    sps = _sps_data
+                    pps = _pps_data
+                if sps:
+                    self._codec.parse(START_CODE + sps)
+                if pps:
+                    self._codec.parse(START_CODE + pps)
                 logger.warning("Decode overflow: drained {} NALs, requesting keyframe", drained)
                 self._loop.call_soon_threadsafe(self._request_keyframe)
                 continue
@@ -285,7 +293,8 @@ class H264StreamTrack(VideoStreamTrack):
         if wait > 0.002:
             await asyncio.sleep(wait)
         elif wait < -0.5:
-            return await self.recv()
+            self._first_pts = frame.pts
+            self._first_time = time.monotonic()
 
         return frame
 
