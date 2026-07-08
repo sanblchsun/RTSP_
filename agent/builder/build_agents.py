@@ -35,10 +35,10 @@ CURRENT_OS = platform.system()
 # Source files (all in AGENT_DIR)
 SOURCES = [
     "main.cpp",
+    "rdp_agent.cpp",
     "WinRT-API/capture_wgc.cpp",
     "WinRT-API/encoder_x264.cpp",
     "rtp/h264_rtp_packetizer.cpp",
-    "rtsp/rtsp_server.cpp",
 ]
 
 # All source files are now in AGENT_DIR (no separate RTSP sources)
