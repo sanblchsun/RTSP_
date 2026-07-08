@@ -293,7 +293,11 @@ class H264StreamTrack(VideoStreamTrack):
             now = time.monotonic()
             wait = expected_time - now
             if wait > 0.002:
-                await asyncio.sleep(wait)
+                if wait > 1.0:
+                    self._first_pts = frame.pts
+                    self._first_time = time.monotonic()
+                else:
+                    await asyncio.sleep(wait)
             elif wait < -0.5:
                 self._first_pts = frame.pts
                 self._first_time = time.monotonic()
