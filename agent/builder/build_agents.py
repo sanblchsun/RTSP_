@@ -32,21 +32,17 @@ DEPS_LIB = DEPS_BASE / "cross_install" / "lib"
 MINGW_LIB = "/usr/x86_64-w64-mingw32/lib"
 CURRENT_OS = platform.system()
 
-# Source files (in AGENT_DIR)
+# Source files (all in AGENT_DIR)
 SOURCES = [
     "main.cpp",
-    "rdp_agent.cpp",
-    "capture_wgc.cpp",
-    "encoder_x264.cpp",
-    "rtsp_client.cpp",
-]
-
-# RTSP_ reference source files (relative to PROJECT_ROOT)
-RTSP_SOURCES = [
     "WinRT-API/capture_wgc.cpp",
     "WinRT-API/encoder_x264.cpp",
     "rtp/h264_rtp_packetizer.cpp",
+    "rtsp/rtsp_server.cpp",
 ]
+
+# All source files are now in AGENT_DIR (no separate RTSP sources)
+RTSP_SOURCES = []
 
 TARGET_FLAGS = ["--target=x86_64-w64-windows-gnu", "-fms-extensions",
                 f"-L{MINGW_LIB}"]
@@ -187,6 +183,7 @@ def build_exe(build_slug: str, server_url: str) -> Path:
     cmd.extend([
         "-l:libwinhttp.a",
         "-l:libws2_32.a",
+        "-l:libwinmm.a",
         "-l:libadvapi32.a",
         "-l:libuser32.a",
         "-l:libsecur32.a",

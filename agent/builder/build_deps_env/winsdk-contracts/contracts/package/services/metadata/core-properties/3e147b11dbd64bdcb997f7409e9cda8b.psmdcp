@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<coreProperties xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://schemas.openxmlformats.org/package/2006/metadata/core-properties">
+  <dc:creator>Microsoft</dc:creator>
+  <dc:description>The Windows 10 WinRT API Pack enables you to add the latest Windows Runtime APIs support to your .NET Framework 4.6+ and .NET Core 3.0+ libraries and apps.
+       
+This package includes all the supported Windows Runtime APIs up to Windows 10 version 2004. If you are targeting earlier platforms, consider only offering functionality available on the detected platform version. For further details, see:
+https://docs.microsoft.com/en-us/windows/uwp/debug-test-perf/version-adaptive-code
+
+    Supported platforms:
+    - .NET Framework 4.6+
+    - .NET Core 3.0+
+
+Requires default package management format set to PackageReference, and NuGet 4.0 or higher.</dc:description>
+  <dc:identifier>Microsoft.Windows.SDK.Contracts</dc:identifier>
+  <version>10.0.19041.1</version>
+  <keywords>managed WinRT WinForms WPF SDK WindowsSDK</keywords>
+  <lastModifiedBy>NuGet, Version=4.4.1.4, Culture=neutral, PublicKeyToken=31bf3856ad364e35;Microsoft Windows NT 6.2.9200.0;.NET Framework 4.5</lastModifiedBy>
+</coreProperties>
