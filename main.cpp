@@ -79,20 +79,26 @@ public:
         Disconnect();
         ensure_winsock();
 
-        sock_ = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock_ == INVALID_SOCKET) return false;
+        addrinfo hints = {}, *res = NULL;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        std::string port_str = std::to_string(port);
 
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons((uint16_t)port);
-        inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+        if (getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res)
+            return false;
 
-        if (connect(sock_, (sockaddr*)&addr, sizeof(addr)) < 0)
+        sock_ = INVALID_SOCKET;
+        for (auto *a = res; a; a = a->ai_next)
         {
+            sock_ = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+            if (sock_ == INVALID_SOCKET) continue;
+            if (connect(sock_, a->ai_addr, (int)a->ai_addrlen) == 0) break;
             closesocket(sock_);
             sock_ = INVALID_SOCKET;
-            return false;
         }
+        freeaddrinfo(res);
+
+        if (sock_ == INVALID_SOCKET) return false;
 
         std::cout << "TCP: connected to " << host << ":" << port << " (RTSP control)" << std::endl;
         int one = 1;
