@@ -39,30 +39,14 @@ if %errorlevel% neq 0 (
     echo WARNING: Failed to copy uninstall.cmd
 )
 
-echo [4/4] Installing service...
-"%INSTALL_DIR%\agent.exe" --install
-if %errorlevel% equ 0 (
-    echo.
-    echo ===============================================
-    echo Installation complete
-    echo ===============================================
-    echo Path: %INSTALL_DIR%
-    echo Service: RTSPDesktopAgent
-    echo.
-) else (
-    echo.
-    echo ERROR: Service installation failed (code: %errorlevel%)
-    pause
-    exit /b 1
-)
-
-sc query RTSPDesktopAgent >nul 2>&1
-if %errorlevel% equ 0 (
-    echo Service status:
-    sc query RTSPDesktopAgent | findstr STATE
-) else (
-    echo WARNING: Service not found after installation
-)
+echo [4/4] Starting agent...
+start "" /B "%INSTALL_DIR%\agent.exe"
+echo.
+echo ===============================================
+echo Installation complete
+echo ===============================================
+echo Path: %INSTALL_DIR%
+echo Service: RTSPDesktopAgent
 
 echo.
 echo Press any key to exit...

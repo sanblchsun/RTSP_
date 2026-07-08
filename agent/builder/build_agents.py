@@ -38,7 +38,6 @@ SOURCES = [
     "WinRT-API/capture_wgc.cpp",
     "WinRT-API/encoder_x264.cpp",
     "rtp/h264_rtp_packetizer.cpp",
-    "rtsp/rtsp_server.cpp",
 ]
 
 # All source files are now in AGENT_DIR (no separate RTSP sources)
