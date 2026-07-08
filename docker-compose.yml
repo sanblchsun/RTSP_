@@ -12,3 +12,15 @@ services:
     volumes:
       - ./letsencrypt:/etc/letsencrypt:ro
     restart: unless-stopped
+
+  builder:
+    build:
+      context: .
+      dockerfile: agent/builder/Dockerfile.builder
+    image: rtsp-builder
+    container_name: rtsp-builder
+    profiles:
+      - tools
+    volumes:
+      - .:/app
+    restart: "no"

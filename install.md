@@ -4,16 +4,17 @@
 
 ```bash
 sudo mkdir -p /opt/webrtc-relay
-sudo cp -r ~/RTSP_/* /opt/webrtc-relay/
-sudo chown $USER:$USER /opt/webrtc-relay -R
+cd /opt
+sudo clone <репозиторий> webrtc-relay
+sudo chown "$USER":"$USER" /opt/webrtc-relay -R
 ```
 
 ## 2. Создание venv
 
 ```bash
 cd /opt/webrtc-relay
-sudo python3 -m venv venv
-sudo venv/bin/pip install -r requirements.txt
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
 ```
 
 ## 3. Настройка
@@ -21,10 +22,10 @@ sudo venv/bin/pip install -r requirements.txt
 Создать `/opt/webrtc-relay/.env`:
 
 ```
-SITE_DOMAIN=logovoprog.ru
-SSL_CERT_PATH=/opt/webrtc-relay/letsencrypt/live/logovoprog.ru/fullchain.pem
-SSL_KEY_PATH=/opt/webrtc-relay/letsencrypt/live/logovoprog.ru/privkey.pem
-f087827e12c51bba377ef81d09c55e74acdca54b```
+SITE_DOMAIN=<domain.ru>
+SSL_CERT_PATH=/opt/webrtc-relay/letsencrypt/live/<domain.ru>/fullchain.pem
+SSL_KEY_PATH=/opt/webrtc-relay/letsencrypt/live/<domain.ru>/privkey.pem
+```
 
 ## 4. Systemd-сервис
 
@@ -51,7 +52,7 @@ WantedBy=multi-user.target
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now webrtc-relay
-```
+````
 
 ## 5. Firewall
 

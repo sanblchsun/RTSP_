@@ -45,8 +45,9 @@ class InterceptHandler(Handler):
 
 basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
-DEQUE_MAXLEN = 35
-RELAY_QUEUE_MAXLEN = 10    # очередь MediaRelay (тюнинг: плавность vs задержка)
+DEQUE_MAXLEN = 5
+RELAY_QUEUE_MAXLEN = 3   # очередь MediaRelay (тюнинг: плавность vs задержка)
+FRAME_PACING_ENABLED = True  # True = плавно (возможен "разгон"), False = минимальная задержка
 
 RTSP_PORT = int(os.environ.get("RTSP_PORT", "8554"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8001"))
@@ -279,22 +280,23 @@ class H264StreamTrack(VideoStreamTrack):
             await self._has_frames.wait()
         frame = self._deque.popleft()
 
-        if self._first_pts is None:
-            self._first_pts = frame.pts
-            self._first_time = time.monotonic()
+        if FRAME_PACING_ENABLED:
+            if self._first_pts is None:
+                self._first_pts = frame.pts
+                self._first_time = time.monotonic()
 
-        pts_offset = frame.pts - self._first_pts
-        if pts_offset < 0:
-            pts_offset += 1 << 32
+            pts_offset = frame.pts - self._first_pts
+            if pts_offset < 0:
+                pts_offset += 1 << 32
 
-        expected_time = self._first_time + pts_offset / 90000
-        now = time.monotonic()
-        wait = expected_time - now
-        if wait > 0.002:
-            await asyncio.sleep(wait)
-        elif wait < -0.5:
-            self._first_pts = frame.pts
-            self._first_time = time.monotonic()
+            expected_time = self._first_time + pts_offset / 90000
+            now = time.monotonic()
+            wait = expected_time - now
+            if wait > 0.002:
+                await asyncio.sleep(wait)
+            elif wait < -0.5:
+                self._first_pts = frame.pts
+                self._first_time = time.monotonic()
 
         return frame
 
