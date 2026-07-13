@@ -56,7 +56,7 @@ sudo systemctl enable --now webrtc-relay
 
 ## 5. Firewall
 
-Открыть только TCP порты (22, 8001, 8554) и UDP для WebRTC ICE:
+Открыть только TCP порты (22, 8002, 8555) и UDP для WebRTC ICE:
 
 ```bash
 sudo ./scripts/allowlist_firewall.sh <IP_агента>
