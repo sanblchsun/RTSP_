@@ -660,9 +660,21 @@ async def offer(request: Request):
     lines = sdp.split("\r\n")
 
     # Keep only the host candidate matching the IP the browser connected to
+    # to avoid ICE enumerating all network interfaces
     server_ip = request.scope.get("server", [None])[0]
-    if server_ip and server_ip != "0.0.0.0":
-        lines = [l for l in lines if not l.startswith("a=candidate") or f" {server_ip} " in l]
+    if server_ip:
+        if server_ip.startswith("127.") or server_ip.startswith("0."):
+            # localhost — find the first real IP from candidates
+            for l in lines:
+                if l.startswith("a=candidate"):
+                    parts = l.split()
+                    if len(parts) >= 7:
+                        ip = parts[4]
+                        if not ip.startswith("127.") and not ip.startswith("0."):
+                            server_ip = ip
+                            break
+        if not server_ip.startswith("127.") and not server_ip.startswith("0."):
+            lines = [l for l in lines if not l.startswith("a=candidate") or f" {server_ip} " in l]
 
     sdp = "\r\n".join(lines)
 
