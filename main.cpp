@@ -39,6 +39,7 @@
 #endif
 
 // ---- Tuning parameters ----
+static const int kRtspPort = 8555;
 static const int kFps = 15;
 // для kQp
 // 23	отличное ~5-8 Mbps
@@ -253,7 +254,7 @@ static void print_usage(const char *prog)
 {
     std::cout << "Usage:\n"
               << "  " << prog << "                         # RTSP server mode (local, ffplay)\n"
-              << "  " << prog << " push <vps_ip> [port]    # Push to VPS (default port " << 8554 << ")\n";
+              << "  " << prog << " push <vps_ip> [port]    # Push to VPS (default port " << kRtspPort << ")\n";
 }
 
 int main(int argc, char *argv[])
@@ -265,7 +266,7 @@ int main(int argc, char *argv[])
 
     bool push_mode = false;
     std::string vps_host;
-    int vps_port = 8554;
+    int vps_port = kRtspPort;
 
     if (argc > 1)
     {
@@ -348,8 +349,8 @@ int main(int argc, char *argv[])
         });
         if (!sps.empty() && !pps.empty())
             rtsp.SetVideoParams(w, h, sps, pps, kFps);
-        if (rtsp.Start(8554))
-            std::cout << "RTSP ready on port 8554" << std::endl;
+        if (rtsp.Start(kRtspPort))
+            std::cout << "RTSP ready on port " << kRtspPort << std::endl;
         else
             std::cerr << "RTSP start failed" << std::endl;
     }

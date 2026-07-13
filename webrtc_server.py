@@ -49,8 +49,8 @@ DEQUE_MAXLEN = 5
 RELAY_QUEUE_MAXLEN = 3   # очередь MediaRelay (тюнинг: плавность vs задержка)
 FRAME_PACING_ENABLED = True  # True = плавно (возможен "разгон"), False = минимальная задержка
 
-RTSP_PORT = int(os.environ.get("RTSP_PORT", "8554"))
-HTTP_PORT = int(os.environ.get("HTTP_PORT", "8001"))
+RTSP_PORT = int(os.environ.get("RTSP_PORT", "8555"))
+HTTP_PORT = int(os.environ.get("HTTP_PORT", "8002"))
 
 relay = MediaRelay()
 source_track = None
