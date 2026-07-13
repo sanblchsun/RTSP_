@@ -17,7 +17,7 @@ public:
     RtspServer();
     ~RtspServer();
 
-    bool Start(uint16_t port = 8554);
+    bool Start(uint16_t port);
     void Stop();
 
     // Set stream parameters (must be called before Start)
@@ -49,7 +49,7 @@ private:
     // SDP generation
     std::string GenerateSdp() const;
 
-    uint16_t port_ = 8554;
+    uint16_t port_;
     int video_width_ = 1920;
     int video_height_ = 1080;
     int fps_ = 30;
