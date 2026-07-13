@@ -43,14 +43,12 @@ set(SOURCES
     WinRT-API/capture_wgc.cpp
     WinRT-API/encoder_x264.cpp
     rtp/h264_rtp_packetizer.cpp
-    rtsp/rtsp_server.cpp
 )
 set(HEADERS
     WinRT-API/capture_wgc.h
     WinRT-API/encoder_x264.h
     rtp/rtp_header.h
     rtp/h264_rtp_packetizer.h
-    rtsp/rtsp_server.h
 )
 
 add_executable(desktop_streamer ${SOURCES} ${HEADERS})

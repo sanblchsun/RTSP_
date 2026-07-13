@@ -213,9 +213,11 @@ class H264StreamTrack(VideoStreamTrack):
                     sps = _sps_data
                     pps = _pps_data
                 if sps:
-                    self._codec.parse(START_CODE + sps)
+                    for pkt in self._codec.parse(START_CODE + sps):
+                        self._codec.decode(pkt)
                 if pps:
-                    self._codec.parse(START_CODE + pps)
+                    for pkt in self._codec.parse(START_CODE + pps):
+                        self._codec.decode(pkt)
                 logger.warning("Decode overflow: drained {} NALs, requesting keyframe", drained)
                 self._loop.call_soon_threadsafe(self._request_keyframe)
                 continue
@@ -229,7 +231,7 @@ class H264StreamTrack(VideoStreamTrack):
             try:
                 for packet in self._codec.parse(nal_data):
                     for frame in self._codec.decode(packet):
-                        if frame.width is None or frame.height is None:
+                        if frame.width is None or frame.height is None or frame.width == 0 or frame.height == 0:
                             continue
                         frame.pts = rtp_timestamp
                         frame.time_base = fractions.Fraction(1, 90000)

@@ -13,9 +13,6 @@
     <ClCompile Include="C:\Users\user\project\RTSP_\rtp\h264_rtp_packetizer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="C:\Users\user\project\RTSP_\rtsp\rtsp_server.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\capture_wgc.h">
@@ -28,9 +25,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\Users\user\project\RTSP_\rtp\h264_rtp_packetizer.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="C:\Users\user\project\RTSP_\rtsp\rtsp_server.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

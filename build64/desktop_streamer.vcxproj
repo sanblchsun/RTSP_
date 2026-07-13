@@ -376,7 +376,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="C:\Users\user\project\RTSP_\WinRT-API\capture_wgc.cpp" />
     <ClCompile Include="C:\Users\user\project\RTSP_\WinRT-API\encoder_x264.cpp" />
     <ClCompile Include="C:\Users\user\project\RTSP_\rtp\h264_rtp_packetizer.cpp" />
-    <ClCompile Include="C:\Users\user\project\RTSP_\rtsp\rtsp_server.cpp" />
     <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\capture_wgc.h" />
     <ClInclude Include="C:\Users\user\project\RTSP_\WinRT-API\encoder_x264.h" />
     <ClInclude Include="C:\Users\user\project\RTSP_\rtp\rtp_header.h" />

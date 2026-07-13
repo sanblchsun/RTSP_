@@ -2,7 +2,6 @@
 #include "WinRT-API/encoder_x264.h"
 #include "rtp/h264_rtp_packetizer.h"
 #include "rtp/rtp_header.h"
-#include "rtsp/rtsp_server.h"
 
 #include <iostream>
 #include <csignal>
@@ -11,7 +10,6 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
-
 #include <string>
 #include <atomic>
 #include <memory>
@@ -41,11 +39,6 @@
 // ---- Tuning parameters ----
 static const int kRtspPort = 8555;
 static const int kFps = 15;
-// для kQp
-// 23	отличное ~5-8 Mbps
-// 25	хорошее	 ~3-5 Mbps
-// 28	среднее	 ~2-3 Mbps
-// 30	низкое	 ~1-2 Mbps
 static const int kQp = 28;
 
 static std::atomic<bool> g_running{true};
@@ -67,7 +60,7 @@ static bool ensure_winsock()
 static bool ensure_winsock() { return true; }
 #endif
 
-// ---- RTSP client (push mode) ----
+// ---- RTSP client (push to VPS) ----
 class RtspClient
 {
 public:
@@ -204,57 +197,9 @@ private:
     }
 };
 
-// Extract SPS/PPS from encoded NAL data
-static bool extract_sps_pps(const std::vector<uint8_t> &nal_data,
-                            std::vector<uint8_t> &sps,
-                            std::vector<uint8_t> &pps)
-{
-    size_t i = 0;
-    while (i < nal_data.size())
-    {
-        size_t sc_len = 0;
-        if (i + 4 <= nal_data.size() && nal_data[i] == 0 && nal_data[i+1] == 0 && nal_data[i+2] == 0 && nal_data[i+3] == 1)
-            sc_len = 4;
-        else if (i + 3 <= nal_data.size() && nal_data[i] == 0 && nal_data[i+1] == 0 && nal_data[i+2] == 1)
-            sc_len = 3;
-        if (sc_len == 0) { i++; continue; }
-
-        size_t nal_start = i + sc_len;
-        if (nal_start >= nal_data.size()) break;
-
-        uint8_t nal_type = nal_data[nal_start] & 0x1F;
-        size_t nal_end = nal_start;
-
-        // Find end of this NAL (next start code or end)
-        for (size_t j = nal_start + 1; j < nal_data.size(); j++)
-        {
-            if ((j + 4 <= nal_data.size() && nal_data[j] == 0 && nal_data[j+1] == 0 && nal_data[j+2] == 0 && nal_data[j+3] == 1) ||
-                (j + 3 <= nal_data.size() && nal_data[j] == 0 && nal_data[j+1] == 0 && nal_data[j+2] == 1))
-            {
-                nal_end = j;
-                break;
-            }
-            nal_end = nal_data.size();
-        }
-
-        if (nal_type == 7) // SPS
-            sps.assign(nal_data.begin() + nal_start, nal_data.begin() + nal_end);
-        else if (nal_type == 8) // PPS
-            pps.assign(nal_data.begin() + nal_start, nal_data.begin() + nal_end);
-
-        if (!sps.empty() && !pps.empty())
-            return true;
-
-        i = nal_end;
-    }
-    return !sps.empty() && !pps.empty();
-}
-
 static void print_usage(const char *prog)
 {
-    std::cout << "Usage:\n"
-              << "  " << prog << "                         # RTSP server mode (local, ffplay)\n"
-              << "  " << prog << " push <vps_ip> [port]    # Push to VPS (default port " << kRtspPort << ")\n";
+    std::cout << "Usage: " << prog << " push <vps_ip> [port]\n";
 }
 
 int main(int argc, char *argv[])
@@ -262,28 +207,14 @@ int main(int argc, char *argv[])
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // Server's frame queue size (webrtc_server.py: deque maxlen) = 20
-
-    bool push_mode = false;
-    std::string vps_host;
-    int vps_port = kRtspPort;
-
-    if (argc > 1)
+    if (argc < 3 || std::string(argv[1]) != "push")
     {
-        std::string mode = argv[1];
-        if (mode == "push" && argc > 2)
-        {
-            push_mode = true;
-            vps_host = argv[2];
-            if (argc > 3)
-                vps_port = std::atoi(argv[3]);
-        }
-        else
-        {
-            print_usage(argv[0]);
-            return -1;
-        }
+        print_usage(argv[0]);
+        return -1;
     }
+
+    std::string vps_host = argv[2];
+    int vps_port = (argc > 3) ? std::atoi(argv[3]) : kRtspPort;
 
     // ---- Init capture ----
     auto capture = std::make_unique<WGCCapture>();
@@ -305,55 +236,13 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // ---- Get SPS/PPS from encoder headers ----
-    std::vector<uint8_t> sps = encoder->GetSps();
-    std::vector<uint8_t> pps = encoder->GetPps();
-    if (sps.empty() || pps.empty())
-    {
-        // Fallback: capture first frame and extract
-        std::vector<uint8_t> bgra, first_nals;
-        int fw = 0, fh = 0;
-        for (int i = 0; i < 60 && g_running.load(); i++)
-        {
-            if (capture->CaptureFrame(0, bgra, fw, fh))
-            {
-                first_nals.clear();
-                if (encoder->EncodeFrame(bgra, first_nals) && !first_nals.empty())
-                {
-                    extract_sps_pps(first_nals, sps, pps);
-                    break;
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
-        }
-    }
-    std::cout << "SPS: " << sps.size() << " PPS: " << pps.size() << std::endl;
-
     // ---- Setup ----
     H264RtpPacketizer packetizer;
     packetizer.SetMaxPayloadSize(8000);
     packetizer.SetSsrc(0xDEADBEEF);
 
-    RtspServer rtsp;
     RtspClient rtsp_client;
-
-    if (push_mode)
-    {
-        std::cout << "Push mode: TCP to " << vps_host << ":" << vps_port << std::endl;
-    }
-    else
-    {
-        std::cout << "RTSP server mode (local)" << std::endl;
-        rtsp.SetLogCallback([](const std::string &msg) {
-            std::cout << "[rtsp] " << msg << std::endl;
-        });
-        if (!sps.empty() && !pps.empty())
-            rtsp.SetVideoParams(w, h, sps, pps, kFps);
-        if (rtsp.Start(kRtspPort))
-            std::cout << "RTSP ready on port " << kRtspPort << std::endl;
-        else
-            std::cerr << "RTSP start failed" << std::endl;
-    }
+    std::cout << "Push mode: TCP to " << vps_host << ":" << vps_port << std::endl;
 
     // ---- Main loop ----
 #ifdef _WIN32
@@ -385,55 +274,46 @@ int main(int argc, char *argv[])
         if (nals.empty())
             continue;
 
-        // RTP packetize (both modes)
         packetizer.Packetize(nals.data(), nals.size(), rtp_ts, rtp_packets);
         rtp_ts += rtp_ts_step;
 
-        if (push_mode)
+        // Auto-connect on first frame
+        if (!rtsp_client.HandshakeDone())
         {
-            // Auto-connect on first frame
-            if (!rtsp_client.HandshakeDone())
+            if (rtsp_client.Connect(vps_host, vps_port))
             {
-                if (rtsp_client.Connect(vps_host, vps_port))
+                if (!rtsp_client.Handshake())
                 {
-                    if (!rtsp_client.Handshake())
-                    {
-                        std::cout << "RTSP handshake failed, retrying in 1s..." << std::endl;
-                        rtsp_client.Disconnect();
-                        std::this_thread::sleep_for(std::chrono::seconds(1));
-                        continue;
-                    }
-                }
-                else
-                {
+                    std::cout << "RTSP handshake failed, retrying in 1s..." << std::endl;
+                    rtsp_client.Disconnect();
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     continue;
                 }
             }
-
-            // Check for incoming keyframe requests from server
-            rtsp_client.CheckForIncoming();
-            if (rtsp_client.KeyframeRequested())
+            else
             {
-                encoder->RequestKeyframe();
-                rtsp_client.ClearKeyframeFlag();
-            }
-
-            for (const auto &pkt : rtp_packets)
-            {
-                if (!rtsp_client.SendRtp(pkt.data(), pkt.size()))
-                {
-                    std::cout << "VPS disconnected, reconnecting..." << std::endl;
-                    rtsp_client.Disconnect();
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
-                    break;
-                }
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                continue;
             }
         }
-        else if (rtsp.IsClientConnected())
+
+        // Check for incoming keyframe requests from server
+        rtsp_client.CheckForIncoming();
+        if (rtsp_client.KeyframeRequested())
         {
-            for (const auto &pkt : rtp_packets)
-                rtsp.SendRtp(pkt.data(), pkt.size());
+            encoder->RequestKeyframe();
+            rtsp_client.ClearKeyframeFlag();
+        }
+
+        for (const auto &pkt : rtp_packets)
+        {
+            if (!rtsp_client.SendRtp(pkt.data(), pkt.size()))
+            {
+                std::cout << "VPS disconnected, reconnecting..." << std::endl;
+                rtsp_client.Disconnect();
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                break;
+            }
         }
 
         frame_count++;
@@ -457,7 +337,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    rtsp.Stop();
     rtsp_client.Disconnect();
     encoder->Shutdown();
     capture->Shutdown();
